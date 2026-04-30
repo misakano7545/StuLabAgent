@@ -103,7 +103,54 @@ def _wmic_multivalue_tokens(s: str) -> List[str]:
     return out
 
 
+def _wmic_netconnectionid_for_adapter_index(adapter_index: int) -> Tuple[Optional[str], str]:
+    """Win32_NetworkAdapter.Index（与 NICConfiguration.Index 一致）→ NetConnectionID。"""
+    try:
+        p = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapter",
+                "where",
+                "Index=%d" % adapter_index,
+                "get",
+                "NetConnectionID,NetEnabled",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+        )
+    except OSError as e:
+        return None, "wmic adapter Index=%s: %s" % (adapter_index, e)
+    if p.returncode != 0:
+        return None, (p.stderr or p.stdout or "wmic adapter failed").strip()[:300]
+    enabled_name: Optional[str] = None
+    any_name: Optional[str] = None
+    for row in _parse_wmic_list(p.stdout or ""):
+        nid = row.get("netconnectionid", "").strip()
+        if not nid:
+            continue
+        net = row.get("netenabled", "").strip().lower() in ("true", "1")
+        if net:
+            enabled_name = nid
+            break
+        if any_name is None:
+            any_name = nid
+    if enabled_name:
+        return enabled_name, "adapter.Index=%d" % adapter_index
+    if any_name:
+        return any_name, "adapter.Index=%d (NetEnabled=false)" % adapter_index
+    return None, "no NetConnectionID for adapter.Index=%d" % adapter_index
+
+
 def _wmic_nic_name_for_index(idx: int) -> Tuple[Optional[str], str]:
+    """
+    将「路由表 / NICConfiguration 使用的 InterfaceIndex」解析为 netsh 用的连接名（NetConnectionID）。
+
+    Win7 上 Win32_NetworkAdapter.InterfaceIndex 常与路由表 ifIndex 不一致，故在直接匹配失败后，
+    用 Win32_NetworkAdapterConfiguration.InterfaceIndex → Index → Win32_NetworkAdapter。
+    """
     try:
         p2 = subprocess.run(
             [
@@ -130,8 +177,57 @@ def _wmic_nic_name_for_index(idx: int) -> Tuple[Optional[str], str]:
             continue
         nid = row.get("netconnectionid", "").strip()
         if nid:
-            return nid, "wmic"
-    return None, "NetConnectionID not found for index %s" % idx
+            return nid, "wmic NetworkAdapter.InterfaceIndex"
+
+    try:
+        pc = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapterConfiguration",
+                "where",
+                "InterfaceIndex=%d" % idx,
+                "get",
+                "Index,IPEnabled",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=30,
+        )
+    except OSError as e:
+        return None, "NetConnectionID not found for ifIndex %s (direct); NICConfig: %s" % (idx, e)
+    if pc.returncode != 0:
+        return None, "NetConnectionID not found for ifIndex %s (direct); NICConfig query: %s" % (
+            idx,
+            (pc.stderr or pc.stdout or "").strip()[:300],
+        )
+    cfg_rows = list(_parse_wmic_list(pc.stdout or ""))
+    adapter_indices: List[int] = []
+    for row in cfg_rows:
+        ie = row.get("ipenabled", "").strip().lower()
+        if ie not in ("true", "1"):
+            continue
+        m = re.search(r"\d+", row.get("index", ""))
+        if m:
+            adapter_indices.append(int(m.group()))
+    if not adapter_indices:
+        for row in cfg_rows:
+            m = re.search(r"\d+", row.get("index", ""))
+            if m:
+                adapter_indices.append(int(m.group()))
+    seen = set()
+    ordered: List[int] = []
+    for i in adapter_indices:
+        if i not in seen:
+            seen.add(i)
+            ordered.append(i)
+    for ai in ordered:
+        name, why = _wmic_netconnectionid_for_adapter_index(ai)
+        if name:
+            return name, "wmic NICConfig.InterfaceIndex=%d → %s" % (idx, why)
+    return None, "NetConnectionID not found for ifIndex %s (direct + NICConfig.Index fallback)" % idx
 
 
 def _interface_from_wmi_default_gateway() -> Tuple[Optional[str], str]:

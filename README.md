@@ -160,7 +160,7 @@ python -m agent.main --config configs\agent.json
 
 1. WMI `DefaultIPGateway`
 2. 若本机存在 `Get-NetRoute` cmdlet：PowerShell 默认路由，再 `Get-NetIPConfiguration`（避免仅按系统版本误判，Win7 兼容模式误报为 6.2+ 时不会误调）
-3. WMI `Win32_IP4RouteTable`（默认路由的 `InterfaceIndex` → 网卡名，Win7 不依赖 `IPAddress` 字符串反查）
+3. WMI `Win32_IP4RouteTable`（默认路由的 `InterfaceIndex` 先对齐 `NICConfiguration`，再用其 `Index` 查 `NetworkAdapter` 得 `NetConnectionID`；Win7 上路由 ifIndex 常与 `NetworkAdapter.InterfaceIndex` 不一致）
 4. `route print -4` + WMI 反查
 
 再用 `netsh interface ipv4` 应用配置：
