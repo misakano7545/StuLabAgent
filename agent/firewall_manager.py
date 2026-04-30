@@ -1,4 +1,4 @@
-"""Clash-based network access restriction for student agents."""
+"""Mihomo-based network access restriction for student agents."""
 
 from __future__ import annotations
 
@@ -39,20 +39,15 @@ def _get_clash_binary_path() -> Tuple[bool, str]:
     project_root = os.path.dirname(script_dir)
     exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else script_dir
 
-    clash_path = os.path.join(project_root, "mihomo.exe")
-    if os.path.isfile(clash_path):
-        return True, clash_path
-    clash_path = os.path.join(exe_dir, "mihomo.exe")
-    if os.path.isfile(clash_path):
-        return True, clash_path
-    clash_path = os.path.join(exe_dir, "clash.exe")
-    if os.path.isfile(clash_path):
-        return True, clash_path
+    mihomo_path = os.path.join(project_root, "mihomo.exe")
+    if os.path.isfile(mihomo_path):
+        return True, mihomo_path
+    mihomo_path = os.path.join(exe_dir, "mihomo.exe")
+    if os.path.isfile(mihomo_path):
+        return True, mihomo_path
     if shutil.which("mihomo"):
         return True, "mihomo"
-    if shutil.which("clash"):
-        return True, "clash"
-    return False, "Clash binary not found"
+    return False, "mihomo 可执行文件未找到"
 
 
 def _ensure_config_dir() -> None:
@@ -248,10 +243,10 @@ def _start_clash_process(clash_path: str) -> Tuple[bool, str]:
         )
         time.sleep(1.5)
         if _clash_process.poll() is not None:
-            return False, "Clash process exited immediately"
-        return True, "Clash started"
+            return False, "mihomo 进程立即退出"
+        return True, "mihomo 已启动"
     except Exception as e:
-        return False, f"Failed to start Clash: {e}"
+        return False, f"启动 mihomo 失败: {e}"
 
 
 def _is_clash_running() -> bool:
@@ -278,7 +273,7 @@ def apply_blacklist(rules: List[Dict[str, str]]) -> Tuple[bool, str]:
 
     ok, msg = _start_clash_process(clash_path)
     if not ok:
-        return False, f"启动 Clash 失败: {msg}"
+        return False, f"启动 mihomo 失败: {msg}"
 
     return True, f"已添加 {len(rules)} 条黑名单规则"
 
@@ -298,7 +293,7 @@ def apply_whitelist(rules: List[Dict[str, str]]) -> Tuple[bool, str]:
 
     ok, msg = _start_clash_process(clash_path)
     if not ok:
-        return False, f"启动 Clash 失败: {msg}"
+        return False, f"启动 mihomo 失败: {msg}"
 
     return True, f"已启用白名单模式，允许 {len(rules)} 个目标"
 
@@ -318,7 +313,7 @@ def block_all_network() -> Tuple[bool, str]:
 
     ok, msg = _start_clash_process(clash_path)
     if not ok:
-        return False, f"启动 Clash 失败: {msg}"
+        return False, f"启动 mihomo 失败: {msg}"
 
     return True, "已启用完全断网模式"
 
@@ -346,13 +341,13 @@ def start_clash_if_config_exists() -> Tuple[bool, str]:
         return False, clash_path
 
     if _is_clash_running():
-        return True, "Clash 已在运行"
+        return True, "mihomo 已在运行"
 
     ok, msg = _start_clash_process(clash_path)
     if not ok:
-        return False, f"启动 Clash 失败: {msg}"
+        return False, f"启动 mihomo 失败: {msg}"
 
-    return True, "Clash 已启动"
+    return True, "mihomo 已启动"
 
 
 def get_current_restriction_status() -> Dict[str, Any]:

@@ -30,7 +30,7 @@
   - 教师端通常无需管理员权限（但需放行监听端口入站）。
   - 学生端执行改名 / 改 IP / 网络限制时必须管理员权限。
 - 可选组件（仅学生端网络限制需要）：
-  - `mihomo.exe`（或 `clash.exe`，推荐用 `mihomo.exe` 命名）
+  - `mihomo.exe`（必须与 [mihomo](https://github.com/MetaCubeX/mihomo) 发行版一致）
 
 ---
 
@@ -38,7 +38,7 @@
 
 - `teacher/`：教师端入口、UI、TCP 服务。
 - `agent/`：学生端入口、机器标识、改名、网络控制逻辑。
-- `common/`：通信协议、配置路径、Clash 配置构建。
+- `common/`：通信协议、配置路径、mihomo 规则 YAML 构建。
 - `configs/`：示例配置（`teacher.json`、`agent.json`）。
 - `package/`：PyInstaller 构建脚本与 `.spec`。
 
@@ -131,8 +131,8 @@ python -m agent.main --config configs\agent.json
   - `disable`：解除限制并删除本地覆盖配置。
 - 二进制查找顺序（学生端）：
   - 项目根目录 `mihomo.exe`（开发运行）
-  - 程序同目录 `mihomo.exe` / `clash.exe`（打包运行）
-  - 系统 `PATH` 中 `mihomo` / `clash`
+  - 程序同目录 `mihomo.exe`（打包运行）
+  - 系统 `PATH` 中的 `mihomo`
 - 需要管理员权限，否则会返回“需要管理员权限”。
 
 ---

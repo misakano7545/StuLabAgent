@@ -1,4 +1,4 @@
-"""Clash config builder - shared between teacher and agent."""
+"""Mihomo-compatible rule YAML builder - shared between teacher and agent."""
 
 from __future__ import annotations
 

@@ -727,7 +727,7 @@ class TeacherApp(tk.Tk):
             "DOMAIN": "匹配完整域名。",
             "DOMAIN-SUFFIX": "匹配域名后缀，如 google.com 可匹配 www.google.com。",
             "DOMAIN-KEYWORD": "匹配域名关键字。",
-            "DOMAIN-WILDCARD": "域名通配符匹配，仅支持 * 和 ?（与 Clash 其他通配符语法不同）。",
+            "DOMAIN-WILDCARD": "域名通配符匹配，仅支持 * 和 ?（与 Clash 规则里其它通配符写法不同）。",
             "DOMAIN-REGEX": "域名正则表达式匹配。",
             "GEOSITE": "匹配 Geosite 内域名分组。",
             "IP-CIDR": "匹配目标 IP 地址范围（CIDR）。",
