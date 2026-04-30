@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+from common.wincli_escape import wmic_call_arg_eq, wmic_where_eq
+
 
 def rename_computer(new_name: str) -> tuple[bool, str]:
     """
@@ -29,7 +31,8 @@ def rename_computer(new_name: str) -> tuple[bool, str]:
             cur = os.environ.get("COMPUTERNAME", "")
             if not cur:
                 return False, "COMPUTERNAME not set"
-            where = "name='%s'" % cur.replace("'", "''")
+            where = wmic_where_eq("name", cur)
+            name_arg = wmic_call_arg_eq("name", new_name)
             cmd = [
                 "wmic",
                 "computersystem",
@@ -37,7 +40,7 @@ def rename_computer(new_name: str) -> tuple[bool, str]:
                 where,
                 "call",
                 "rename",
-                "name=%s" % new_name,
+                name_arg,
             ]
             p = subprocess.run(
                 cmd,

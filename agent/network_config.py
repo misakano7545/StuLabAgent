@@ -7,6 +7,8 @@ import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
 
+from common.wincli_escape import netsh_interface_name_arg
+
 
 def _subprocess_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -338,7 +340,7 @@ def get_default_ipv4_interface_name() -> Tuple[Optional[str], str]:
 
 def apply_ipv4_dhcp(interface_name: str) -> Tuple[bool, str]:
     flags = _subprocess_flags()
-    name_arg = "name=%s" % interface_name
+    name_arg = netsh_interface_name_arg(interface_name)
     try:
         p1 = subprocess.run(
             ["netsh", "interface", "ipv4", "set", "address", name_arg, "dhcp"],
@@ -372,7 +374,7 @@ def apply_ipv4_static(
     dns_secondary: Optional[str],
 ) -> Tuple[bool, str]:
     flags = _subprocess_flags()
-    name_arg = "name=%s" % interface_name
+    name_arg = netsh_interface_name_arg(interface_name)
     gw = gateway.strip() if gateway else ""
     gw_arg = gw if gw else "none"
     mask_n = normalize_mask(mask)
