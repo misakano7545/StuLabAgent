@@ -1,0 +1,114 @@
+name: Build Windows Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: win7
+            python-version: "3.8"
+          - name: win10
+            python-version: "3.11"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.target.python-version }}
+          architecture: x64
+
+      - name: Install dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build executables
+        shell: powershell
+        run: |
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
+          python -m PyInstaller --clean --noconfirm package\teacher.spec
+          python -m PyInstaller --clean --noconfirm package\agent.spec
+
+      - name: Download mihomo for network restrict
+        shell: powershell
+        run: |
+          $mihomoUrl = "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-windows-amd64-compatible-v1.19.24.zip"
+          $mihomoZip = "mihomo-windows-amd64-compatible-v1.19.24.zip"
+
+          if (Test-Path $mihomoZip) { Remove-Item $mihomoZip -Force }
+          if (Test-Path "mihomo-windows-amd64-compatible.exe") { Remove-Item "mihomo-windows-amd64-compatible.exe" -Force }
+          if (Test-Path "mihomo.exe") { Remove-Item "mihomo.exe" -Force }
+
+          Invoke-WebRequest -Uri $mihomoUrl -OutFile $mihomoZip
+          Expand-Archive -Path $mihomoZip -DestinationPath "." -Force
+          Rename-Item -Path "mihomo-windows-amd64-compatible.exe" -NewName "mihomo.exe" -Force
+
+      - name: Create zip packages
+        shell: powershell
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ("${{ github.ref_type }}" -ne "tag") {
+            $sha = "${{ github.sha }}"
+            $version = "sha-$($sha.Substring(0, 7))"
+          }
+
+          $outDir = "out/${{ matrix.target.name }}"
+          $agentDir = "$outDir/LabAgent"
+          $teacherDir = "$outDir/LabTeacher"
+          $agentZip = "LabAgent-${{ matrix.target.name }}-$version.zip"
+          $teacherZip = "LabTeacher-${{ matrix.target.name }}-$version.zip"
+
+          New-Item -ItemType Directory -Path "$agentDir/configs" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$teacherDir/configs" -Force | Out-Null
+
+          Copy-Item "dist/LabAgent.exe" "$agentDir/LabAgent.exe" -Force
+          Copy-Item "mihomo.exe" "$agentDir/mihomo.exe" -Force
+          Copy-Item "dist/LabTeacher.exe" "$teacherDir/LabTeacher.exe" -Force
+          Copy-Item "configs/agent.json" "$agentDir/configs/agent.json" -Force
+          Copy-Item "configs/teacher.json" "$teacherDir/configs/teacher.json" -Force
+
+          if (Test-Path "$outDir/$agentZip") { Remove-Item "$outDir/$agentZip" -Force }
+          if (Test-Path "$outDir/$teacherZip") { Remove-Item "$outDir/$teacherZip" -Force }
+          Compress-Archive -Path "$agentDir/*" -DestinationPath "$outDir/$agentZip"
+          Compress-Archive -Path "$teacherDir/*" -DestinationPath "$outDir/$teacherZip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target.name }}
+          path: out/${{ matrix.target.name }}/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip

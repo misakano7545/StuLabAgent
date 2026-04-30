@@ -1,0 +1,5 @@
+# 仅用于在本机打包 exe（教师端 / Agent）
+pyinstaller>=5.13
+
+pystray
+Pillow

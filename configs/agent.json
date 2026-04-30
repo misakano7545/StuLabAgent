@@ -1,0 +1,6 @@
+{
+  "teacher_host": "192.168.1.100",
+  "teacher_port": 18765,
+  "token": "change-me",
+  "heartbeat_interval_sec": 15
+}

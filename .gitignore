@@ -1,0 +1,20 @@
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
+*.pyzwzwzw
+
+# Clash Meta
+mihomo.exe
+configs/config.yaml
+
+# Trae
+.trae/
