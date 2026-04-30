@@ -331,6 +331,13 @@ class TeacherApp(tk.Tk):
         sel = self.tree.selection()
         return [str(sid) for sid in sel]
 
+    def _pc_name_for_session(self, sid: str) -> str:
+        for s in self._sessions_cache:
+            if s.session_id == sid:
+                h = (s.hostname or "").strip()
+                return h if h else "-"
+        return "-"
+
     def _session_values(self, s: "ClientSession") -> Tuple[str, str, str, str, str, str, str]:
         status = "在线" if s.online else "离线"
         return (
@@ -500,7 +507,10 @@ class TeacherApp(tk.Tk):
                 return
             cmd_id = self.next_cmd_id()
             if self._on_enqueue_rename(sid, cmd_id, name):
-                self.log_line("已排队: 改名 cmd_id=%s session=%s -> %s" % (cmd_id, sid, name))
+                self.log_line(
+                    "已排队: 改名 pc_name=%s cmd_id=%s session=%s -> %s"
+                    % (self._pc_name_for_session(sid), cmd_id, sid, name)
+                )
                 d.destroy()
             else:
                 messagebox.showerror("错误", "会话不存在或已断开。", parent=d)
@@ -573,8 +583,13 @@ class TeacherApp(tk.Tk):
             cmd_id = self.next_cmd_id()
             if self._on_enqueue_set_ipv4(sid, cmd_id, payload):
                 self.log_line(
-                    "已排队: 设 IP cmd_id=%s session=%s %s"
-                    % (cmd_id, sid, json.dumps(payload, ensure_ascii=False))
+                    "已排队: 设 IP pc_name=%s cmd_id=%s session=%s %s"
+                    % (
+                        self._pc_name_for_session(sid),
+                        cmd_id,
+                        sid,
+                        json.dumps(payload, ensure_ascii=False),
+                    )
                 )
                 d.destroy()
             else:
@@ -599,9 +614,15 @@ class TeacherApp(tk.Tk):
             for sid in sids:
                 cmd_id = self.next_cmd_id()
                 if self._on_enqueue_power(sid, cmd_id, act):
-                    self.log_line("已排队: 电源 cmd_id=%s session=%s action=%s" % (cmd_id, sid, act))
+                    self.log_line(
+                        "已排队: 电源 pc_name=%s cmd_id=%s session=%s action=%s"
+                        % (self._pc_name_for_session(sid), cmd_id, sid, act)
+                    )
                 else:
-                    self.log_line("失败: 电源操作 session=%s 会话不存在或已断开" % sid)
+                    self.log_line(
+                        "失败: 电源操作 pc_name=%s session=%s 会话不存在或已断开"
+                        % (self._pc_name_for_session(sid), sid)
+                    )
             d.destroy()
 
         bf = ttk.Frame(d, padding=8)
@@ -1025,9 +1046,15 @@ class TeacherApp(tk.Tk):
             for sid in sids:
                 cmd_id = self.next_cmd_id()
                 if self._on_enqueue_network_restrict(sid, cmd_id, payload):
-                    self.log_line("已排队: 网络限制 cmd_id=%s session=%s mode=%s" % (cmd_id, sid, mode_name))
+                    self.log_line(
+                        "已排队: 网络限制 pc_name=%s cmd_id=%s session=%s mode=%s"
+                        % (self._pc_name_for_session(sid), cmd_id, sid, mode_name)
+                    )
                 else:
-                    self.log_line("失败: 网络限制 session=%s 会话不存在或已断开" % sid)
+                    self.log_line(
+                        "失败: 网络限制 pc_name=%s session=%s 会话不存在或已断开"
+                        % (self._pc_name_for_session(sid), sid)
+                    )
             d.destroy()
 
         bf = ttk.Frame(d)

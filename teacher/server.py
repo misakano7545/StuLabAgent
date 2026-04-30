@@ -247,10 +247,16 @@ class TeacherServer:
                             },
                         )
                 elif mtype == MSG_RESULT:
+                    res_host = ""
+                    with self._sessions_lock:
+                        s_res = self._sessions.get(session_id)
+                        if s_res:
+                            res_host = str(s_res.hostname or "")
                     self._emit(
                         "command_result",
                         {
                             "session_id": session_id,
+                            "hostname": res_host,
                             "cmd_id": msg.get("cmd_id"),
                             "ok": bool(msg.get("ok")),
                             "message": str(msg.get("message") or ""),
@@ -267,6 +273,7 @@ class TeacherServer:
                                 "client_error",
                                 {
                                     "session_id": session_id,
+                                    "hostname": str(session.hostname or ""),
                                     "message": f"read config file error: {e}",
                                 },
                             )
@@ -289,19 +296,32 @@ class TeacherServer:
                             },
                         )
         except (ConnectionError, OSError, ValueError, json.JSONDecodeError) as e:
+            err_host = ""
+            if session_id:
+                with self._sessions_lock:
+                    s_err = self._sessions.get(session_id)
+                    if s_err:
+                        err_host = str(s_err.hostname or "")
             self._emit(
                 "client_error",
                 {
                     "session_id": session_id or "",
+                    "hostname": err_host,
                     "message": str(e),
                 },
             )
         finally:
             if session_id:
+                disc_host = ""
                 with self._sessions_lock:
-                    self._sessions.pop(session_id, None)
+                    s_disc = self._sessions.pop(session_id, None)
                     self._conn_to_session.pop(conn, None)
-                self._emit("client_disconnected", {"session_id": session_id})
+                    if s_disc:
+                        disc_host = str(s_disc.hostname or "")
+                self._emit(
+                    "client_disconnected",
+                    {"session_id": session_id, "hostname": disc_host},
+                )
             try:
                 conn.close()
             except OSError:

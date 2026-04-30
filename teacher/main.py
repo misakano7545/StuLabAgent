@@ -98,28 +98,40 @@ def main() -> None:
             while True:
                 kind, data = event_q.get_nowait()
                 if kind == "client_registered":
+                    hn = data.get("hostname") or "-"
                     app.log_line(
-                        "上线: %s [%s] %s (%s)"
+                        "上线: pc_name=%s [%s] %s (%s)"
                         % (
-                            data.get("hostname"),
+                            hn,
                             (data.get("machine_id") or "")[:12] or "-",
                             data.get("ipv4"),
                             data.get("addr"),
                         )
                     )
                 elif kind == "client_disconnected":
-                    app.log_line("断开: session=%s" % data.get("session_id"))
+                    app.log_line(
+                        "断开: pc_name=%s session=%s"
+                        % (data.get("hostname") or "-", data.get("session_id"))
+                    )
                 elif kind == "command_result":
                     app.log_line(
-                        "结果 cmd_id=%s ok=%s %s"
+                        "结果 pc_name=%s cmd_id=%s ok=%s %s"
                         % (
+                            data.get("hostname") or "-",
                             data.get("cmd_id"),
                             data.get("ok"),
                             data.get("message"),
                         )
                     )
                 elif kind == "client_error":
-                    app.log_line("连接错误: %s" % data.get("message"))
+                    app.log_line(
+                        "连接错误: pc_name=%s session=%s %s"
+                        % (
+                            data.get("hostname") or "-",
+                            data.get("session_id") or "-",
+                            data.get("message"),
+                        )
+                    )
                 elif kind == "heartbeat":
                     pass
         except queue.Empty:
