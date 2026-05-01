@@ -264,6 +264,10 @@ LabAgent\
 
 ---
 
+## 交流群
+
+![](images/qqgroup.jpg)
+
 ## 鸣谢
 
 - [MetaCubeX / mihomo](https://github.com/MetaCubeX/mihomo)
