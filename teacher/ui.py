@@ -93,7 +93,7 @@ class TeacherApp(tk.Tk):
         on_enqueue_network_restrict: Callable[[str, str, Dict[str, Any]], bool],
     ) -> None:
         super().__init__()
-        self.title("机房管理 — 教师端   by MisakaNo（QQ:1689910089）")
+        self.title("机房管理 — 教师端   by MisakaNo（QQ：1689910089、交流群：1090225838）")
         self.geometry(f"{_MIN_WIN_W}x{_MIN_WIN_H}")
         _apply_min_window_size(self)
         self._server = server
@@ -783,7 +783,7 @@ class TeacherApp(tk.Tk):
 
         f = ttk.LabelFrame(d, text="静态参数", padding=6)
         f.grid(row=2, column=0, sticky="ew", padx=8, pady=6)
-        labels = ["IP 地址", "子网掩码（点分或前缀如 24）", "默认网关（可空）", "主 DNS（可空）", "辅 DNS（可空）"]
+        labels = ["IP 地址", "子网掩码（如 255.255.255.0，或 24）", "默认网关", "主 DNS", "辅 DNS（可空）"]
         entries: List[ttk.Entry] = []
         for i, lab in enumerate(labels):
             ttk.Label(f, text=lab + ":").grid(row=i, column=0, sticky=tk.W, pady=2)
