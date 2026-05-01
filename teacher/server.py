@@ -49,6 +49,20 @@ def _socket_exc_likely_peer_hangup(exc: BaseException) -> bool:
     return False
 
 
+def _coerce_ipv4_detail(raw: object) -> Dict[str, Any]:
+    """Agent 上报的 ipv4_detail 归一化，避免异常类型进入会话状态。"""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary"):
+        if k not in raw:
+            continue
+        out[k] = str(raw.get(k) or "").strip()
+    if "dhcp" in raw:
+        out["dhcp"] = bool(raw.get("dhcp"))
+    return out
+
+
 @dataclass
 class ClientSession:
     session_id: str
@@ -56,6 +70,7 @@ class ClientSession:
     machine_id: str = ""
     hostname: str = ""
     reported_ipv4: str = ""
+    ipv4_detail: Dict[str, Any] = field(default_factory=dict)
     os_version: str = ""
     agent_version: str = ""
     last_seen: float = 0.0
@@ -194,6 +209,7 @@ class TeacherServer:
             machine_id = str(first.get("machine_id") or "")
             hostname = str(first.get("hostname") or "")
             reported_ipv4 = str(first.get("ipv4") or "")
+            ipv4_detail = _coerce_ipv4_detail(first.get("ipv4_detail"))
             os_version = str(first.get("os_version") or "")
             agent_version = str(first.get("agent_version") or "")
 
@@ -203,6 +219,7 @@ class TeacherServer:
                 machine_id=machine_id,
                 hostname=hostname,
                 reported_ipv4=reported_ipv4,
+                ipv4_detail=ipv4_detail,
                 os_version=os_version,
                 agent_version=agent_version,
                 last_seen=time.time(),
@@ -246,6 +263,9 @@ class TeacherServer:
                             s.last_seen = time.time()
                             s.hostname = str(msg.get("hostname") or s.hostname)
                             s.reported_ipv4 = str(msg.get("ipv4") or s.reported_ipv4)
+                            det = msg.get("ipv4_detail")
+                            if isinstance(det, dict):
+                                s.ipv4_detail = _coerce_ipv4_detail(det)
                             s.online = True
                             host_for_emit = s.hostname
                             ipv4_for_emit = s.reported_ipv4

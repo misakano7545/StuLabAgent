@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
+import socket
 import subprocess
 import sys
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from common.wincli_escape import netsh_interface_name_arg
 
@@ -85,6 +88,18 @@ def _clean_wmic_value(s: str) -> str:
     if s.startswith('"') and s.endswith('"'):
         return s[1:-1]
     return s
+
+
+def _ipv4_gateway_from_wmi_default_gateway(raw: str) -> str:
+    """DefaultIPGateway 可能同时含 IPv4 与 IPv6（如 Win7 fe80）；取第一个可用的 IPv4。"""
+    for t in _wmic_multivalue_tokens(raw or ""):
+        t = t.strip()
+        if _is_dotted_ipv4(t) and not _is_ipv4_link_local(t):
+            return t
+    g = _clean_wmic_value(raw or "").strip()
+    if _is_dotted_ipv4(g) and not _is_ipv4_link_local(g):
+        return g
+    return ""
 
 
 def _wmic_multivalue_tokens(s: str) -> List[str]:
@@ -669,3 +684,339 @@ def apply_ipv4_static(
         return True, "static ipv4 ok (connection may drop briefly)"
     except OSError as e:
         return False, str(e)
+
+
+def _outbound_ipv4_hint() -> str:
+    """与 Agent 上报 IPv4 相同的启发式：连向公网时选用的本机源地址。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return ""
+
+
+def _is_dotted_ipv4(s: str) -> bool:
+    return bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", (s or "").strip()))
+
+
+def _is_ipv4_link_local(s: str) -> bool:
+    return (s or "").strip().lower().startswith("169.254.")
+
+
+def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
+    """NetConnectionID（netsh 接口名）→ Win32_NetworkAdapter.InterfaceIndex。"""
+    want = (target or "").strip().lower()
+    if not want:
+        return None
+    try:
+        p = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapter",
+                "where",
+                "NetEnabled=true",
+                "get",
+                "NetConnectionID,InterfaceIndex",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    for row in _parse_wmic_list(p.stdout or ""):
+        nid = row.get("netconnectionid", "").strip()
+        m = re.search(r"\d+", row.get("interfaceindex", ""))
+        if not nid or not m:
+            continue
+        if nid.lower() == want:
+            return int(m.group())
+    return None
+
+
+def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str, str]]:
+    try:
+        p = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapterConfiguration",
+                "where",
+                "InterfaceIndex=%d" % if_idx,
+                "get",
+                "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    rows = _parse_wmic_list(p.stdout or "")
+    for row in rows:
+        if row.get("ipenabled", "").strip().lower() in ("true", "1"):
+            return row
+    return rows[0] if rows else None
+
+
+def _ipv4_subnet_pairs_from_wmi_row(row: Dict[str, str]) -> List[Tuple[str, str]]:
+    """
+    WMI 中 IPAddress / IPSubnet 按下标对齐，但可能夹杂 IPv6。
+    对每条 IPv4 优先取同下标的点分掩码；否则按第 j 条 IPv4 对应 subs 中第 j 个点分掩码。
+    """
+    ips_t = _wmic_multivalue_tokens(row.get("ipaddress", ""))
+    subs_t = _wmic_multivalue_tokens(row.get("ipsubnet", ""))
+    dotted_masks = [s.strip() for s in subs_t if _is_dotted_ipv4(s.strip())]
+    v4_idx: List[int] = []
+    for i, ip in enumerate(ips_t):
+        ip = ip.strip()
+        if _is_dotted_ipv4(ip) and not _is_ipv4_link_local(ip):
+            v4_idx.append(i)
+    out: List[Tuple[str, str]] = []
+    for j, i in enumerate(v4_idx):
+        ip = ips_t[i].strip()
+        sub = ""
+        if i < len(subs_t):
+            cand = subs_t[i].strip()
+            if _is_dotted_ipv4(cand):
+                sub = cand
+        if not sub and j < len(dotted_masks):
+            sub = dotted_masks[j]
+        out.append((ip, sub))
+    return out
+
+
+def _wmic_default_route_interface_index() -> Optional[int]:
+    """与 _interface_from_wmi_ip4_route_table 相同：默认 IPv4 路由所在 InterfaceIndex。"""
+    try:
+        p = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_IP4RouteTable",
+                "where",
+                "Destination='0.0.0.0' and Mask='0.0.0.0'",
+                "get",
+                "InterfaceIndex,Metric1",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    candidates: List[Tuple[int, int]] = []
+    for row in _parse_wmic_list(p.stdout or ""):
+        m = re.search(r"\d+", row.get("interfaceindex", ""))
+        if not m:
+            continue
+        idx = int(m.group())
+        met_s = row.get("metric1", "").strip()
+        try:
+            metric = int(met_s) if met_s.isdigit() else 9999
+        except ValueError:
+            metric = 9999
+        candidates.append((metric, idx))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
+
+def _detail_row_to_dict(
+    row: Dict[str, str], preferred_ip: str
+) -> Dict[str, Any]:
+    pairs = _ipv4_subnet_pairs_from_wmi_row(row)
+    pref = (preferred_ip or "").strip().lower()
+    chosen_ip, chosen_mask = "", ""
+    for ip, sub in pairs:
+        if pref and ip.lower() == pref:
+            chosen_ip, chosen_mask = ip, sub
+            break
+    if not chosen_ip and pairs:
+        chosen_ip, chosen_mask = pairs[0]
+    gw = _ipv4_gateway_from_wmi_default_gateway(row.get("defaultipgateway", ""))
+    if not gw or gw.upper() == "NULL":
+        gw = ""
+    dns_tokens = _wmic_multivalue_tokens(row.get("dnsserversearchorder", ""))
+    dns_v4: List[str] = []
+    for t in dns_tokens:
+        t = t.strip()
+        if _is_dotted_ipv4(t):
+            dns_v4.append(t)
+    dhcp_raw = row.get("dhcpenabled", "").strip().lower()
+    dhcp = dhcp_raw in ("true", "1")
+    return {
+        "ip": chosen_ip,
+        "mask": chosen_mask,
+        "gateway": gw,
+        "dns_primary": dns_v4[0] if dns_v4 else "",
+        "dns_secondary": dns_v4[1] if len(dns_v4) > 1 else "",
+        "dhcp": dhcp,
+    }
+
+
+def _powershell_ipv4_detail_by_default_route() -> Optional[Dict[str, Any]]:
+    """
+    用默认路由 InterfaceIndex 取 IPv4 地址/前缀/网关/DNS，不依赖 NetConnectionID 与 InterfaceAlias 字符串一致。
+    """
+    if not _powershell_has_get_net_route_cmdlet():
+        return None
+    ps = (
+        "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1; "
+        "if (-not $r) { Write-Output '{}'; exit 0 }; "
+        "$idx = $r.InterfaceIndex; "
+        "$n = Get-NetIPConfiguration -InterfaceIndex $idx -ErrorAction SilentlyContinue; "
+        "$ips = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Where-Object { "
+        "$_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } "
+        "| Sort-Object SkipAsSource,InterfaceMetric); "
+        "$pick = $ips | Select-Object -First 1; "
+        "if (-not $pick) { Write-Output '{}'; exit 0 }; "
+        "$gw = ''; "
+        "if ($n -and $n.IPv4DefaultGateway -and $n.IPv4DefaultGateway.NextHop) "
+        "{ $gw = ([string]$n.IPv4DefaultGateway.NextHop).Trim() }; "
+        "$dns = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty ServerAddresses "
+        "| Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' }); "
+        "if ($dns.Count -lt 1 -and $n -and $n.DNSServer) { "
+        "foreach ($s in @($n.DNSServer)) { "
+        "if ($s.AddressFamily -eq 'IPv4' -or $s.AddressFamily -eq 2) "
+        "{ $dns = @($s.ServerAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' }); break } } }; "
+        "$d1 = ''; $d2 = ''; "
+        "if ($dns.Count -ge 1) { $d1 = [string]$dns[0] }; "
+        "if ($dns.Count -ge 2) { $d2 = [string]$dns[1] }; "
+        "$dhcp = ($pick.PrefixOrigin -eq 'Dhcp'); "
+        "$pfx = [int]$pick.PrefixLength; "
+        "$o = @{ ok=$true; ip=$pick.IPAddress; prefix=$pfx; gateway=$gw; "
+        "dns_primary=$d1; dns_secondary=$d2; dhcp=$dhcp }; "
+        "$o | ConvertTo-Json -Compress"
+    )
+    try:
+        p = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                ps,
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if p.returncode != 0:
+        return None
+    raw = (p.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    prefix = data.get("prefix")
+    mask = ""
+    if prefix is not None:
+        try:
+            m = mask_from_prefix(str(int(prefix)))
+            if m:
+                mask = m
+        except (TypeError, ValueError):
+            pass
+    return {
+        "ip": str(data.get("ip") or "").strip(),
+        "mask": mask,
+        "gateway": str(data.get("gateway") or "").strip(),
+        "dns_primary": str(data.get("dns_primary") or "").strip(),
+        "dns_secondary": str(data.get("dns_secondary") or "").strip(),
+        "dhcp": bool(data.get("dhcp")),
+    }
+
+
+def _merge_ipv4_detail_fields(base: Dict[str, Any], add: Dict[str, Any]) -> None:
+    """把 add 中非空字段补入 base；dhcp 任一为真则标为 DHCP。"""
+    for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary"):
+        v = str(add.get(k) or "").strip()
+        if v and not str(base.get(k) or "").strip():
+            base[k] = v
+    if "dhcp" in add:
+        base["dhcp"] = bool(base.get("dhcp")) or bool(add.get("dhcp"))
+
+
+_detail_mono = 0.0
+_detail_payload: Dict[str, Any] = {}
+
+
+def get_default_ipv4_detail_snapshot(ttl_sec: float = 20.0) -> Dict[str, Any]:
+    """
+    默认出口网卡的当前 IPv4 参数，供教师端静态表单预填。
+    优先用 PowerShell（默认路由 InterfaceIndex，与网卡显示名无关），再用 WMI 补缺；带短时缓存。
+    """
+    global _detail_mono, _detail_payload
+    now = time.monotonic()
+    if _detail_payload and (now - _detail_mono) < ttl_sec:
+        return dict(_detail_payload)
+
+    if sys.platform != "win32":
+        _detail_mono = now
+        _detail_payload = {}
+        return {}
+
+    pref = _outbound_ipv4_hint().strip()
+
+    out: Dict[str, Any] = {
+        "ip": "",
+        "mask": "",
+        "gateway": "",
+        "dns_primary": "",
+        "dns_secondary": "",
+        "dhcp": False,
+    }
+
+    psd = _powershell_ipv4_detail_by_default_route()
+    if psd:
+        out.update(psd)
+
+    widx = _wmic_default_route_interface_index()
+    if widx is not None:
+        row = _wmic_nic_configuration_by_interface_index(widx)
+        if row:
+            _merge_ipv4_detail_fields(out, _detail_row_to_dict(row, pref))
+
+    iface_name, _diag = get_default_ipv4_interface_name()
+    if iface_name:
+        if_idx = _wmic_interface_index_for_netconnection_id(iface_name)
+        if if_idx is not None and (widx is None or if_idx != widx):
+            row2 = _wmic_nic_configuration_by_interface_index(if_idx)
+            if row2:
+                _merge_ipv4_detail_fields(out, _detail_row_to_dict(row2, pref))
+
+    if not str(out.get("ip") or "").strip() and pref:
+        out["ip"] = pref
+
+    _detail_mono = now
+    _detail_payload = dict(out)
+    return dict(out)

@@ -559,6 +559,29 @@ class TeacherApp(tk.Tk):
         d.columnconfigure(0, weight=1)
         _dlg_lock_min_size(d)
 
+    def _fill_ipv4_static_fields_from_session(self, entries: List[ttk.Entry], sid: str) -> None:
+        """用学生机上报的默认出口网卡参数预填静态 IPv4 表单（来自 Agent 心跳/注册中的 ipv4_detail）。"""
+        s: Optional["ClientSession"] = None
+        for x in self._sessions_cache:
+            if x.session_id == sid:
+                s = x
+                break
+        if not s:
+            return
+        d = getattr(s, "ipv4_detail", None) or {}
+        if not isinstance(d, dict):
+            d = {}
+        ip = str(d.get("ip") or "").strip() or (s.reported_ipv4 or "").strip()
+        mask = str(d.get("mask") or "").strip()
+        gw = str(d.get("gateway") or "").strip()
+        dns1 = str(d.get("dns_primary") or "").strip()
+        dns2 = str(d.get("dns_secondary") or "").strip()
+        vals = [ip, mask, gw, dns1, dns2]
+        for e, v in zip(entries, vals):
+            e.delete(0, tk.END)
+            if v:
+                e.insert(0, v)
+
     def _dlg_ipv4(self) -> None:
         sids = self.selected_session_ids()
         if not sids:
@@ -590,6 +613,16 @@ class TeacherApp(tk.Tk):
             e.grid(row=i, column=1, sticky=tk.EW, padx=(8, 0), pady=2)
             entries.append(e)
         f.columnconfigure(1, weight=1)
+
+        def sync_static_fields_from_mode(*_a: object) -> None:
+            if mode.get() == "static":
+                self._fill_ipv4_static_fields_from_session(entries, sid)
+            else:
+                for e in entries:
+                    e.delete(0, tk.END)
+
+        mode.trace_add("write", sync_static_fields_from_mode)
+        sync_static_fields_from_mode()
 
         hint = ttk.Label(
             d,

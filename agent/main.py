@@ -39,6 +39,7 @@ from agent.machine_identity import get_machine_id, get_preferred_mac_display
 from agent.network_config import (
     apply_ipv4_dhcp,
     apply_ipv4_static,
+    get_default_ipv4_detail_snapshot,
     get_default_ipv4_interface_name,
     is_admin,
 )
@@ -192,6 +193,7 @@ class AgentClient:
                 "hostname": socket.gethostname(),
                 "machine_id": self.machine_id,
                 "ipv4": _guess_report_ipv4(),
+                "ipv4_detail": get_default_ipv4_detail_snapshot(),
                 "os_version": _get_os_version(),
                 "agent_version": AGENT_VERSION,
                 # Keep legacy key for backward compatibility with old teacher builds.
@@ -403,6 +405,7 @@ class AgentClient:
                         "type": MSG_HEARTBEAT,
                         "hostname": socket.gethostname(),
                         "ipv4": _guess_report_ipv4(),
+                        "ipv4_detail": get_default_ipv4_detail_snapshot(),
                     }
                 )
             except (ConnectionError, OSError, ValueError):
