@@ -444,19 +444,40 @@ class TeacherApp(tk.Tk):
         if x_root is not None and y_root is not None:
             d.geometry(f"+{x_root - 8}+{y_root + 8}")
 
-        lst = tk.Listbox(d, selectmode=tk.MULTIPLE, width=36, height=12)
-        lst.grid(row=0, column=0, columnspan=3, padx=8, pady=(8, 6), sticky="nsew")
-        for item in values:
-            lst.insert(tk.END, item if item else "(空)")
-
+        search_var = tk.StringVar()
+        shown: List[str] = []
         current = self._active_filters.get(col)
-        if current:
-            for i, v in enumerate(values):
-                if v in current:
+
+        ttk.Label(d, text="搜索:").grid(row=0, column=0, padx=(8, 4), pady=(8, 4), sticky=tk.W)
+        search_ent = ttk.Entry(d, textvariable=search_var, width=28)
+        search_ent.grid(row=0, column=1, columnspan=2, padx=(0, 8), pady=(8, 4), sticky="ew")
+
+        lst = tk.Listbox(d, selectmode=tk.MULTIPLE, width=36, height=12)
+        lst.grid(row=1, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="nsew")
+
+        def repopulate(*_, init: bool = False) -> None:
+            nonlocal shown
+            if init:
+                prev_selected = set(current) if current else set()
+            else:
+                prev_selected = {shown[i] for i in lst.curselection()} if shown else set()
+            q = search_var.get().strip().lower()
+            if q:
+                shown = [v for v in values if q in (v or "").lower()]
+            else:
+                shown = list(values)
+            lst.delete(0, tk.END)
+            for v in shown:
+                lst.insert(tk.END, v if v else "(空)")
+            for i, v in enumerate(shown):
+                if v in prev_selected:
                     lst.select_set(i)
 
+        search_var.trace_add("write", lambda *_: repopulate(init=False))
+        repopulate(init=True)
+
         def apply_filter() -> None:
-            selected = {values[i] for i in lst.curselection()}
+            selected = {shown[i] for i in lst.curselection()}
             if selected:
                 self._active_filters[col] = selected
             else:
@@ -471,11 +492,12 @@ class TeacherApp(tk.Tk):
             self._rebuild_tree()
             d.destroy()
 
-        ttk.Button(d, text="应用筛选", command=apply_filter).grid(row=1, column=0, padx=8, pady=(0, 8), sticky="w")
-        ttk.Button(d, text="清除此列", command=clear_filter).grid(row=1, column=1, padx=4, pady=(0, 8))
-        ttk.Button(d, text="取消", command=d.destroy).grid(row=1, column=2, padx=8, pady=(0, 8), sticky="e")
-        d.rowconfigure(0, weight=1)
+        ttk.Button(d, text="应用筛选", command=apply_filter).grid(row=2, column=0, padx=8, pady=(0, 8), sticky="w")
+        ttk.Button(d, text="清除此列", command=clear_filter).grid(row=2, column=1, padx=4, pady=(0, 8))
+        ttk.Button(d, text="取消", command=d.destroy).grid(row=2, column=2, padx=8, pady=(0, 8), sticky="e")
+        d.rowconfigure(1, weight=1)
         d.columnconfigure(0, weight=1)
+        d.columnconfigure(1, weight=1)
         d.columnconfigure(2, weight=1)
 
     def refresh_sessions(self, sessions: List["ClientSession"]) -> None:
