@@ -66,6 +66,19 @@ def _display_reported_mac(mid: str) -> str:
     return "-".join([hx[i : i + 2] for i in range(0, 12, 2)])
 
 
+# 主窗口最小尺寸（子对话框在布局完成后用 _dlg_lock_min_size，与「网络访问限制」相同：minsize 对齐自身 geometry / 所需尺寸，不跟主窗口）
+_MIN_WIN_W, _MIN_WIN_H = 1080, 560
+
+
+def _apply_min_window_size(win: tk.Misc) -> None:
+    win.minsize(_MIN_WIN_W, _MIN_WIN_H)
+
+
+def _dlg_lock_min_size(d: tk.Misc) -> None:
+    d.update_idletasks()
+    d.minsize(d.winfo_reqwidth(), d.winfo_reqheight())
+
+
 class TeacherApp(tk.Tk):
     def __init__(
         self,
@@ -77,7 +90,8 @@ class TeacherApp(tk.Tk):
     ) -> None:
         super().__init__()
         self.title("机房管理 — 教师端   by MisakaNo（QQ:1689910089）")
-        self.geometry("1080x560")
+        self.geometry(f"{_MIN_WIN_W}x{_MIN_WIN_H}")
+        _apply_min_window_size(self)
         self._server = server
         self._on_enqueue_rename = on_enqueue_rename
         self._on_enqueue_set_ipv4 = on_enqueue_set_ipv4
@@ -499,6 +513,7 @@ class TeacherApp(tk.Tk):
         d.columnconfigure(0, weight=1)
         d.columnconfigure(1, weight=1)
         d.columnconfigure(2, weight=1)
+        _dlg_lock_min_size(d)
 
     def refresh_sessions(self, sessions: List["ClientSession"]) -> None:
         self._sessions_cache = list(sessions)
@@ -542,6 +557,7 @@ class TeacherApp(tk.Tk):
         ttk.Button(bf, text="确定", command=ok).pack(side=tk.LEFT, padx=4)
         ttk.Button(bf, text="取消", command=d.destroy).pack(side=tk.LEFT, padx=4)
         d.columnconfigure(0, weight=1)
+        _dlg_lock_min_size(d)
 
     def _dlg_ipv4(self) -> None:
         sids = self.selected_session_ids()
@@ -622,6 +638,7 @@ class TeacherApp(tk.Tk):
         ttk.Button(bf, text="确定", command=ok).pack(side=tk.LEFT, padx=4)
         ttk.Button(bf, text="取消", command=d.destroy).pack(side=tk.LEFT, padx=4)
         d.columnconfigure(0, weight=1)
+        _dlg_lock_min_size(d)
 
     def _dlg_power(self) -> None:
         sids = self.selected_session_ids()
@@ -655,6 +672,7 @@ class TeacherApp(tk.Tk):
         ttk.Button(bf, text="重启", command=lambda: run_power_action("reboot")).pack(
             side=tk.LEFT
         )
+        _dlg_lock_min_size(d)
 
     def _dlg_network_restrict(self) -> None:
         sids = self.selected_session_ids()
@@ -666,6 +684,7 @@ class TeacherApp(tk.Tk):
         d.transient(self)
         d.grab_set()
         d.geometry("550x520")
+        d.minsize(550, 520)
 
         config = _load_config()
         saved_mode = config.get("network_restrict", {}).get("mode", "blacklist")
