@@ -185,7 +185,8 @@ class TeacherServer:
     def _client_loop(self, conn: socket.socket, peer_ip: str) -> None:
         session_id: Optional[str] = None
         try:
-            conn.settimeout(120.0)
+            # Agent 并行采集 IPv4 时单次心跳帧可能延后；读超时过小会在 Win10 上误杀仍为活的连接。
+            conn.settimeout(300.0)
             first = read_frame_from_socket(conn)
             if get_message_type(first) != MSG_REGISTER:
                 write_frame_to_socket(

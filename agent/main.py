@@ -456,7 +456,10 @@ class AgentClient:
                         "type": MSG_HEARTBEAT,
                         "hostname": socket.gethostname(),
                         "ipv4": _guess_report_ipv4(),
-                        "ipv4_detail": get_default_ipv4_detail_snapshot(),
+                        "ipv4_detail": get_default_ipv4_detail_snapshot(
+                            ttl_sec=max(90.0, self.heartbeat_sec * 8.0),
+                            recompute_blocking=False,
+                        ),
                     }
                 )
             except (ConnectionError, OSError, ValueError):

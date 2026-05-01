@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1145,26 +1146,11 @@ def _merge_ipv4_detail_fields(base: Dict[str, Any], add: Dict[str, Any]) -> None
 
 _detail_mono = 0.0
 _detail_payload: Dict[str, Any] = {}
+_detail_snap_lock = threading.Lock()
 
 
-def get_default_ipv4_detail_snapshot(ttl_sec: float = 20.0) -> Dict[str, Any]:
-    """
-    默认出口网卡的当前 IPv4 参数，供教师端静态表单预填。
-    优先用 PowerShell（默认路由 InterfaceIndex，与网卡显示名无关），再用 WMI 补缺；带短时缓存。
-    """
-    global _detail_mono, _detail_payload
-    now = time.monotonic()
-    if _detail_payload and (now - _detail_mono) < ttl_sec:
-        return dict(_detail_payload)
-
-    if sys.platform != "win32":
-        _detail_mono = now
-        _detail_payload = {}
-        return {}
-
-    pref = _outbound_ipv4_hint().strip()
-
-    out: Dict[str, Any] = {
+def _empty_ipv4_detail_for_cache() -> Dict[str, Any]:
+    return {
         "ip": "",
         "mask": "",
         "gateway": "",
@@ -1173,54 +1159,92 @@ def get_default_ipv4_detail_snapshot(ttl_sec: float = 20.0) -> Dict[str, Any]:
         "dhcp": False,
     }
 
-    psd = _powershell_ipv4_detail_by_default_route()
-    if psd:
-        out.update(psd)
 
-    widx = _wmic_default_route_interface_index()
-    if widx is not None:
-        row = _wmic_nic_configuration_by_interface_index(widx)
-        if row:
-            _merge_ipv4_detail_fields(out, _detail_row_to_dict(row, pref))
+def get_default_ipv4_detail_snapshot(
+    ttl_sec: float = 75.0,
+    *,
+    recompute_blocking: bool = True,
+) -> Dict[str, Any]:
+    """
+    默认出口网卡的当前 IPv4 参数，供教师端静态表单预填。
+    优先用 PowerShell（默认路由 InterfaceIndex，与网卡显示名无关），再用 WMI 补缺；带缓存。
 
-    iface_name, _diag = get_default_ipv4_interface_name()
-    if iface_name:
-        if_idx = _wmic_interface_index_for_netconnection_id(iface_name)
-        if if_idx is not None and (widx is None or if_idx != widx):
-            row2 = _wmic_nic_configuration_by_interface_index(if_idx)
-            if row2:
-                _merge_ipv4_detail_fields(out, _detail_row_to_dict(row2, pref))
+    recompute_blocking=False：供心跳线程使用；若有其它线程正在全量采集，则立刻返回上一份缓存，
+    避免与「按需查询」(ttl_sec=0) 并行叠加两次 WMI/子进程拖过教师端单次读超时。
+    """
+    global _detail_mono, _detail_payload
+    now = time.monotonic()
+    if _detail_payload and (now - _detail_mono) < ttl_sec:
+        return dict(_detail_payload)
 
-    if not str(out.get("ip") or "").strip() and pref:
-        out["ip"] = pref
+    if recompute_blocking:
+        _detail_snap_lock.acquire()
+    elif not _detail_snap_lock.acquire(blocking=False):
+        return dict(_detail_payload) if _detail_payload else _empty_ipv4_detail_for_cache()
+    try:
+        now2 = time.monotonic()
+        if _detail_payload and (now2 - _detail_mono) < ttl_sec:
+            return dict(_detail_payload)
 
-    hip = str(out.get("ip") or pref).strip()
-    if hip:
-        need_more = (
+        if sys.platform != "win32":
+            _detail_mono = now2
+            _detail_payload = {}
+            return {}
+
+        pref = _outbound_ipv4_hint().strip()
+
+        out: Dict[str, Any] = _empty_ipv4_detail_for_cache()
+
+        psd = _powershell_ipv4_detail_by_default_route()
+        if psd:
+            out.update(psd)
+
+        widx = _wmic_default_route_interface_index()
+        if widx is not None:
+            row = _wmic_nic_configuration_by_interface_index(widx)
+            if row:
+                _merge_ipv4_detail_fields(out, _detail_row_to_dict(row, pref))
+
+        iface_name, _diag = get_default_ipv4_interface_name()
+        if iface_name:
+            if_idx = _wmic_interface_index_for_netconnection_id(iface_name)
+            if if_idx is not None and (widx is None or if_idx != widx):
+                row2 = _wmic_nic_configuration_by_interface_index(if_idx)
+                if row2:
+                    _merge_ipv4_detail_fields(out, _detail_row_to_dict(row2, pref))
+
+        if not str(out.get("ip") or "").strip() and pref:
+            out["ip"] = pref
+
+        hip = str(out.get("ip") or pref).strip()
+        if hip:
+            need_more = (
+                not str(out.get("mask") or "").strip()
+                or not str(out.get("gateway") or "").strip()
+                or not str(out.get("dns_primary") or "").strip()
+            )
+            if need_more:
+                row_fix = _wmic_nic_configuration_row_for_ipv4(hip)
+                if row_fix:
+                    _merge_ipv4_detail_fields(out, _detail_row_to_dict(row_fix, hip))
+        if not str(out.get("gateway") or "").strip():
+            gw_rp = _route_print_ipv4_default_gateway()
+            if gw_rp:
+                out["gateway"] = gw_rp
+
+        idx_netsh = widx
+        if idx_netsh is None and iface_name:
+            alt_i = _wmic_interface_index_for_netconnection_id(iface_name)
+            if alt_i is not None:
+                idx_netsh = alt_i
+        if idx_netsh is not None and (
             not str(out.get("mask") or "").strip()
-            or not str(out.get("gateway") or "").strip()
             or not str(out.get("dns_primary") or "").strip()
-        )
-        if need_more:
-            row_fix = _wmic_nic_configuration_row_for_ipv4(hip)
-            if row_fix:
-                _merge_ipv4_detail_fields(out, _detail_row_to_dict(row_fix, hip))
-    if not str(out.get("gateway") or "").strip():
-        gw_rp = _route_print_ipv4_default_gateway()
-        if gw_rp:
-            out["gateway"] = gw_rp
+        ):
+            _merge_ipv4_detail_fields(out, _netsh_ipv4_enrich_from_ifindex(idx_netsh))
 
-    idx_netsh = widx
-    if idx_netsh is None and iface_name:
-        alt_i = _wmic_interface_index_for_netconnection_id(iface_name)
-        if alt_i is not None:
-            idx_netsh = alt_i
-    if idx_netsh is not None and (
-        not str(out.get("mask") or "").strip()
-        or not str(out.get("dns_primary") or "").strip()
-    ):
-        _merge_ipv4_detail_fields(out, _netsh_ipv4_enrich_from_ifindex(idx_netsh))
-
-    _detail_mono = now
-    _detail_payload = dict(out)
-    return dict(out)
+        _detail_mono = time.monotonic()
+        _detail_payload = dict(out)
+        return dict(out)
+    finally:
+        _detail_snap_lock.release()
