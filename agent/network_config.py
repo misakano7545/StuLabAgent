@@ -8,13 +8,49 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from common.wincli_escape import netsh_interface_name_arg
 
 
 def _subprocess_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _win_console_encoding() -> str:
+    """wmic/route/netsh 在中文 Windows 上多为系统 ANSI（如 cp936），勿用默认 UTF-8 解码。"""
+    if sys.platform != "win32":
+        return "utf-8"
+    try:
+        import ctypes
+
+        cp = ctypes.windll.kernel32.GetACP()
+        if cp:
+            return "cp%d" % int(cp)
+    except Exception:
+        pass
+    return "cp936"
+
+
+def _run_text_cmd(args: List[str], timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
+    """非 PowerShell 的控制台子进程：Windows 用系统代码页解码。"""
+    if sys.platform == "win32":
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding=_win_console_encoding(),
+            errors="replace",
+            creationflags=_subprocess_flags(),
+            timeout=timeout,
+        )
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        creationflags=0,
+        timeout=timeout,
+    )
 
 
 def is_admin() -> bool:
@@ -531,19 +567,93 @@ def _parse_route_print_default_gateway(route_text: str) -> Optional[str]:
 
 def _route_print_ipv4_default_gateway() -> str:
     try:
-        p = subprocess.run(
-            ["route", "print", "-4"],
-            capture_output=True,
-            text=True,
-            creationflags=_subprocess_flags(),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        p = _run_text_cmd(["route", "print", "-4"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return ""
     if p.returncode != 0:
         return ""
     g = _parse_route_print_default_gateway(p.stdout or "")
     return g if g else ""
+
+
+def _parse_netsh_dns_ipv4_list(text: str) -> List[str]:
+    """从 netsh show dns 输出里按出现顺序取前几个公网/私网 IPv4 DNS。"""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for m in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text):
+        ip = m.group(1)
+        if not _is_dotted_ipv4(ip):
+            continue
+        low = ip.lower()
+        if low.startswith(("0.", "127.", "169.254.", "224.", "255.")):
+            continue
+        if ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+        if len(out) >= 4:
+            break
+    return out[:2]
+
+
+def _netsh_ipv4_enrich_from_ifindex(if_idx: int) -> Dict[str, Any]:
+    """
+    用「接口索引」调用 netsh，不依赖中文连接名；补缺子网掩码与 DNS（Win7/编码异常时尤其有效）。
+    """
+    out: Dict[str, Any] = {}
+    if sys.platform != "win32" or if_idx < 0:
+        return out
+    try:
+        p = _run_text_cmd(
+            ["netsh", "interface", "ipv4", "show", "addresses", str(if_idx)],
+            timeout=25,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return out
+    if p.returncode != 0:
+        return out
+    text = p.stdout or ""
+
+    mmask = re.search(
+        r"\(\s*mask\s+(\d{1,3}(?:\.\d{1,3}){3})\s*\)",
+        text,
+        re.I,
+    )
+    if mmask:
+        out["mask"] = mmask.group(1)
+    if not out.get("mask"):
+        mp = re.search(
+            r"(?:Subnet\s+Prefix|子网前缀)[^\n\r]*?(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})",
+            text,
+            re.I,
+        )
+        if mp:
+            ml = mask_from_prefix(mp.group(2))
+            if ml:
+                out["mask"] = ml
+    if not out.get("mask"):
+        mp2 = re.search(
+            r"(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})\b[^\n\r]*\(mask\s+(\d{1,3}(?:\.\d{1,3}){3})\)",
+            text,
+            re.I,
+        )
+        if mp2:
+            out["mask"] = mp2.group(3)
+
+    try:
+        p2 = _run_text_cmd(
+            ["netsh", "interface", "ipv4", "show", "dns", str(if_idx)],
+            timeout=25,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return out
+    if p2.returncode != 0:
+        return out
+    dns = _parse_netsh_dns_ipv4_list(p2.stdout or "")
+    if dns:
+        out["dns_primary"] = dns[0]
+    if len(dns) > 1:
+        out["dns_secondary"] = dns[1]
+    return out
 
 
 def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str, str]]:
@@ -555,7 +665,7 @@ def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str,
     if not target or not _is_dotted_ipv4(target):
         return None
     try:
-        p = subprocess.run(
+        p = _run_text_cmd(
             [
                 "wmic",
                 "path",
@@ -566,12 +676,9 @@ def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str,
                 "InterfaceIndex,IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
                 "/format:list",
             ],
-            capture_output=True,
-            text=True,
-            creationflags=_subprocess_flags(),
             timeout=45,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     if p.returncode != 0:
         return None
@@ -591,13 +698,10 @@ def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str,
 
 def _interface_from_route_print_only() -> Tuple[Optional[str], str]:
     """Win7+：route print -4 + WMI 反查（不依赖系统语言列标题）。"""
-    p = subprocess.run(
-        ["route", "print", "-4"],
-        capture_output=True,
-        text=True,
-        creationflags=_subprocess_flags(),
-        timeout=30,
-    )
+    try:
+        p = _run_text_cmd(["route", "print", "-4"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None, "route print failed"
     if p.returncode != 0:
         return None, (p.stderr or p.stdout or "route print failed").strip()[:300]
     ip = _parse_route_print_default_interface_ip(p.stdout or "")
@@ -791,7 +895,7 @@ def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
     if not want:
         return None
     try:
-        p = subprocess.run(
+        p = _run_text_cmd(
             [
                 "wmic",
                 "path",
@@ -802,12 +906,9 @@ def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
                 "NetConnectionID,InterfaceIndex",
                 "/format:list",
             ],
-            capture_output=True,
-            text=True,
-            creationflags=_subprocess_flags(),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     if p.returncode != 0:
         return None
@@ -825,7 +926,7 @@ def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str
     """Win7 上部分环境需用 Index= 而非 InterfaceIndex=，两种都试。"""
     for where in ("InterfaceIndex=%d" % if_idx, "Index=%d" % if_idx):
         try:
-            p = subprocess.run(
+            p = _run_text_cmd(
                 [
                     "wmic",
                     "path",
@@ -836,12 +937,9 @@ def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str
                     "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
                     "/format:list",
                 ],
-                capture_output=True,
-                text=True,
-                creationflags=_subprocess_flags(),
                 timeout=30,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             continue
         if p.returncode != 0:
             continue
@@ -884,7 +982,7 @@ def _ipv4_subnet_pairs_from_wmi_row(row: Dict[str, str]) -> List[Tuple[str, str]
 def _wmic_default_route_interface_index() -> Optional[int]:
     """与 _interface_from_wmi_ip4_route_table 相同：默认 IPv4 路由所在 InterfaceIndex。"""
     try:
-        p = subprocess.run(
+        p = _run_text_cmd(
             [
                 "wmic",
                 "path",
@@ -895,12 +993,9 @@ def _wmic_default_route_interface_index() -> Optional[int]:
                 "InterfaceIndex,Metric1",
                 "/format:list",
             ],
-            capture_output=True,
-            text=True,
-            creationflags=_subprocess_flags(),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     if p.returncode != 0:
         return None
@@ -1114,6 +1209,17 @@ def get_default_ipv4_detail_snapshot(ttl_sec: float = 20.0) -> Dict[str, Any]:
         gw_rp = _route_print_ipv4_default_gateway()
         if gw_rp:
             out["gateway"] = gw_rp
+
+    idx_netsh = widx
+    if idx_netsh is None and iface_name:
+        alt_i = _wmic_interface_index_for_netconnection_id(iface_name)
+        if alt_i is not None:
+            idx_netsh = alt_i
+    if idx_netsh is not None and (
+        not str(out.get("mask") or "").strip()
+        or not str(out.get("dns_primary") or "").strip()
+    ):
+        _merge_ipv4_detail_fields(out, _netsh_ipv4_enrich_from_ifindex(idx_netsh))
 
     _detail_mono = now
     _detail_payload = dict(out)

@@ -62,6 +62,18 @@ def _debug(msg: str) -> None:
         sys.stderr.write("%s\n" % msg)
 
 
+def _coerce_ipv4_detail_for_wire(snap: Any) -> Dict[str, Any]:
+    """保证 MSG_RESULT.ipv4_detail 可 JSON 序列化。"""
+    if not isinstance(snap, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary"):
+        out[k] = str(snap.get(k) or "").strip()
+    if "dhcp" in snap:
+        out["dhcp"] = bool(snap.get("dhcp"))
+    return out
+
+
 def _guess_report_ipv4() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -280,22 +292,42 @@ class AgentClient:
                 msg = "%s; auto reboot in 1s" % msg
                 self._schedule_reboot()
         elif cmd_type == MSG_COMMAND_QUERY_IPV4_DETAIL:
-            snap = get_default_ipv4_detail_snapshot(ttl_sec=0.0)
-            ok = True
-            msg = "ipv4_detail"
-            detail_payload = snap
-            try:
-                self._send(
-                    {
-                        "type": MSG_RESULT,
-                        "cmd_id": cmd_id,
-                        "ok": bool(ok),
-                        "message": str(msg),
-                        "ipv4_detail": detail_payload if isinstance(detail_payload, dict) else {},
-                    }
-                )
-            except (ConnectionError, OSError, ValueError):
-                self._stop.set()
+            # 快照采集较慢，勿在读线程同步执行：否则长时间不 read_frame，易与心跳/ACK 交错出问题甚至读线程因异常退出。
+            cid = cmd_id
+
+            def _query_worker() -> None:
+                try:
+                    snap = get_default_ipv4_detail_snapshot(ttl_sec=0.0)
+                    detail = _coerce_ipv4_detail_for_wire(snap)
+                    self._send(
+                        {
+                            "type": MSG_RESULT,
+                            "cmd_id": cid,
+                            "ok": True,
+                            "message": "ipv4_detail",
+                            "ipv4_detail": detail,
+                        }
+                    )
+                except (ConnectionError, OSError, ValueError):
+                    self._stop.set()
+                except Exception as e:
+                    _debug("query ipv4 detail failed: %r" % (e,))
+                    try:
+                        self._send(
+                            {
+                                "type": MSG_RESULT,
+                                "cmd_id": cid,
+                                "ok": False,
+                                "message": str(e)[:500],
+                                "ipv4_detail": {},
+                            }
+                        )
+                    except (ConnectionError, OSError, ValueError):
+                        self._stop.set()
+
+            threading.Thread(
+                target=_query_worker, daemon=True, name="ipv4-detail-query"
+            ).start()
             return
         elif cmd_type == MSG_COMMAND_SET_IPV4:
             name, diag = get_default_ipv4_interface_name()

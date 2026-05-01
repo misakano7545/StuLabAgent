@@ -69,6 +69,9 @@ def _display_reported_mac(mid: str) -> str:
 # 主窗口最小尺寸（子对话框在布局完成后用 _dlg_lock_min_size，与「网络访问限制」相同：minsize 对齐自身 geometry / 所需尺寸，不跟主窗口）
 _MIN_WIN_W, _MIN_WIN_H = 1080, 560
 
+# IPv4 实时查询要等「下一次心跳」才会下发到学生端，再加 WMI/PS 耗时；太短会误判超时。
+_IPV4_LIVE_QUERY_WAIT_MS = 50000
+
 
 def _apply_min_window_size(win: tk.Misc) -> None:
     win.minsize(_MIN_WIN_W, _MIN_WIN_H)
@@ -592,6 +595,18 @@ class TeacherApp(tk.Tk):
                 volatile["ip"] = str(x.reported_ipv4 or "").strip()
             return
 
+    @staticmethod
+    def _volatile_fill_strings_missing_from(volatile: Dict[str, Any], src: Dict[str, Any]) -> None:
+        """src 中为空的键不覆盖；仅补缺字符串类字段。"""
+        for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary"):
+            if str(volatile.get(k) or "").strip():
+                continue
+            inc = str(src.get(k) or "").strip()
+            if inc:
+                volatile[k] = inc
+        if "dhcp" not in volatile and "dhcp" in src:
+            volatile["dhcp"] = bool(src["dhcp"])
+
     def _fill_ipv4_entries_from_snapshot(
         self, entries: List[ttk.Entry], sid: str, snap: Dict[str, Any]
     ) -> None:
@@ -625,7 +640,8 @@ class TeacherApp(tk.Tk):
             return
         if str(data.get("session_id") or "") != str(w["sid"]):
             return
-        self._ipv4_live_waiters.pop(cmd_id, None)
+        if str(w.get("phase") or "") not in ("waiting", "timed_out"):
+            return
         dlg: tk.Toplevel = w["dlg"]
         ah = w.get("after_cancel_holder") or []
         if ah and ah[0] is not None:
@@ -634,6 +650,7 @@ class TeacherApp(tk.Tk):
             except tk.TclError:
                 pass
             ah[0] = None
+        self._ipv4_live_waiters.pop(cmd_id, None)
         if not dlg.winfo_exists():
             return
         entries = w["entries"]
@@ -648,18 +665,28 @@ class TeacherApp(tk.Tk):
         ok_rb = bool(data.get("ok"))
         det = data.get("ipv4_detail")
 
+        timed_late = w.get("phase") == "timed_out"
+        fb = dict(w.get("frozen_fallback") or {})
+
         volatile.clear()
-        if ok_rb and isinstance(det, dict):
+        if isinstance(det, dict):
             volatile.update(det)
+        self._volatile_fill_strings_missing_from(volatile, fb)
         self._merge_session_ipv4_detail_into_volatile(volatile, sid)
-        if not ok_rb:
+        self._volatile_fill_strings_missing_from(volatile, fb)
+
+        if timed_late and ok_rb and isinstance(det, dict) and any(
+            str(det.get(k) or "").strip() for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary")
+        ):
+            hint.configure(text=BASE_HINT + "（此前曾等待超时；已收到学生端快照并刷新表单。）", wraplength=420)
+        elif not ok_rb:
             hint.configure(
-                text=BASE_HINT + "（学生端未返回有效快照或未识别命令，已用最近一次心跳/cache 补缺。）",
+                text=BASE_HINT + "（学生端未返回有效快照或未识别命令，已用打开对话框时的缓存补缺。）",
                 wraplength=420,
             )
         elif not isinstance(det, dict) or not any(str(det.get(k) or "").strip() for k in ("ip", "mask")):
             hint.configure(
-                text=BASE_HINT + "（快照内容不完整，已从会话缓存补缺。）",
+                text=BASE_HINT + "（快照内容不完整，已用打开对话框时的缓存补缺。）",
                 wraplength=420,
             )
         else:
@@ -675,20 +702,32 @@ class TeacherApp(tk.Tk):
             self._fill_ipv4_entries_from_snapshot(entries, sid, volatile)
 
     def _ipv4_live_query_timeout(self, cmd_id: str) -> None:
-        w = self._ipv4_live_waiters.pop(cmd_id, None)
-        if not w:
+        w = self._ipv4_live_waiters.get(cmd_id)
+        if not w or str(w.get("phase")) != "waiting":
             return
         dlg = w["dlg"]
         if not dlg.winfo_exists():
+            self._ipv4_live_waiters.pop(cmd_id, None)
             return
+        ah = w.get("after_cancel_holder") or []
+        if ah:
+            ah[0] = None
         volatile: Dict[str, Any] = w["volatile"]
         sid = w["sid"]
-        self._snapshot_session_ipv4_into_dict(volatile, sid)
+        fb = dict(w.get("frozen_fallback") or {})
+
+        volatile.clear()
+        volatile.update(fb)
+        self._merge_session_ipv4_detail_into_volatile(volatile, sid)
+        self._volatile_fill_strings_missing_from(volatile, fb)
+
+        w["phase"] = "timed_out"
+
         hint = w["hint"]
         hint.configure(
             text=(
                 "将作用于「默认网关所在网卡」。改 IP 可能导致 Agent 短暂断线后自动重连。"
-                "（等待学生端响应超时，已使用最近一次心跳数据。）"
+                "（等待学生端响应超时，已先用打开对话框时缓存的数据显示；稍后若收到实时快照仍会刷新。）"
             ),
             wraplength=420,
         )
@@ -818,7 +857,10 @@ class TeacherApp(tk.Tk):
         ttk.Button(bf, text="取消", command=cancel_ipv4_dlg).pack(side=tk.LEFT, padx=4)
         rb_static.configure(state=tk.DISABLED)
         rb_dhcp.configure(state=tk.DISABLED)
+        frozen_fallback: Dict[str, Any] = {}
+        self._snapshot_session_ipv4_into_dict(frozen_fallback, sid)
         self._ipv4_live_waiters[q_cmd_id] = {
+            "phase": "waiting",
             "sid": sid,
             "dlg": d,
             "entries": entries,
@@ -828,8 +870,9 @@ class TeacherApp(tk.Tk):
             "after_cancel_holder": after_holder,
             "radios": [rb_static, rb_dhcp],
             "btn_ok": btn_ok,
+            "frozen_fallback": dict(frozen_fallback),
         }
-        after_holder[0] = d.after(15000, lambda: self._ipv4_live_query_timeout(q_cmd_id))
+        after_holder[0] = d.after(_IPV4_LIVE_QUERY_WAIT_MS, lambda: self._ipv4_live_query_timeout(q_cmd_id))
         if not self._on_enqueue_query_ipv4_detail(sid, q_cmd_id):
             self._ipv4_live_waiters.pop(q_cmd_id, None)
             if after_holder[0] is not None:
