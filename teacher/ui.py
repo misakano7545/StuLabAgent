@@ -565,6 +565,11 @@ class TeacherApp(tk.Tk):
         d.columnconfigure(0, weight=1)
         _dlg_lock_min_size(d)
 
+    @staticmethod
+    def _volatile_indicates_dhcp(volatile: Dict[str, Any]) -> bool:
+        """学生端快照 / 会话中的 dhcp 布尔；缺省或非真视为静态。"""
+        return bool(volatile.get("dhcp"))
+
     def _snapshot_session_ipv4_into_dict(self, volatile: Dict[str, Any], sid: str) -> None:
         """把会话缓存中的 ipv4_detail / reported_ipv4 写入 volatile（整块覆盖）。"""
         volatile.clear()
@@ -698,7 +703,12 @@ class TeacherApp(tk.Tk):
             e.configure(state=tk.NORMAL)
         for r in radios:
             r.configure(state=tk.NORMAL)
-        if mode.get() == "static":
+        if self._volatile_indicates_dhcp(volatile):
+            mode.set("dhcp")
+            for e in entries:
+                e.delete(0, tk.END)
+        else:
+            mode.set("static")
             self._fill_ipv4_entries_from_snapshot(entries, sid, volatile)
 
     def _ipv4_live_query_timeout(self, cmd_id: str) -> None:
@@ -739,7 +749,12 @@ class TeacherApp(tk.Tk):
         for r in w.get("radios") or []:
             r.configure(state=tk.NORMAL)
         mode = w["mode"]
-        if mode.get() == "static":
+        if self._volatile_indicates_dhcp(volatile):
+            mode.set("dhcp")
+            for e in w["entries"]:
+                e.delete(0, tk.END)
+        else:
+            mode.set("static")
             self._fill_ipv4_entries_from_snapshot(w["entries"], sid, volatile)
 
     def _dlg_ipv4(self) -> None:
@@ -756,7 +771,10 @@ class TeacherApp(tk.Tk):
         d.transient(self)
         d.grab_set()
         volatile: Dict[str, Any] = {}
-        mode = tk.StringVar(value="static")
+        self._snapshot_session_ipv4_into_dict(volatile, sid)
+        mode = tk.StringVar(
+            value="dhcp" if self._volatile_indicates_dhcp(volatile) else "static"
+        )
 
         rb_static = ttk.Radiobutton(d, text="静态 IPv4", variable=mode, value="static")
         rb_static.grid(row=0, column=0, sticky=tk.W, padx=8, pady=(8, 2))
@@ -857,8 +875,7 @@ class TeacherApp(tk.Tk):
         ttk.Button(bf, text="取消", command=cancel_ipv4_dlg).pack(side=tk.LEFT, padx=4)
         rb_static.configure(state=tk.DISABLED)
         rb_dhcp.configure(state=tk.DISABLED)
-        frozen_fallback: Dict[str, Any] = {}
-        self._snapshot_session_ipv4_into_dict(frozen_fallback, sid)
+        frozen_fallback = dict(volatile)
         self._ipv4_live_waiters[q_cmd_id] = {
             "phase": "waiting",
             "sid": sid,

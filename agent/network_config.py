@@ -598,7 +598,8 @@ def _parse_netsh_dns_ipv4_list(text: str) -> List[str]:
 
 def _netsh_ipv4_enrich_from_ifindex(if_idx: int) -> Dict[str, Any]:
     """
-    用「接口索引」调用 netsh，不依赖中文连接名；补缺子网掩码与 DNS（Win7/编码异常时尤其有效）。
+    用「接口索引」调用 netsh，不依赖中文连接名；
+    补缺子网掩码与 DNS（Win7/编码异常时尤其有效），并从 show addresses 解析 DHCP 是否启用。
     """
     out: Dict[str, Any] = {}
     if sys.platform != "win32" or if_idx < 0:
@@ -613,6 +614,10 @@ def _netsh_ipv4_enrich_from_ifindex(if_idx: int) -> Dict[str, Any]:
     if p.returncode != 0:
         return out
     text = p.stdout or ""
+
+    ndhcp = _netsh_parse_dhcp_enabled_from_addresses(text)
+    if ndhcp is not None:
+        out["dhcp"] = ndhcp
 
     mmask = re.search(
         r"\(\s*mask\s+(\d{1,3}(?:\.\d{1,3}){3})\s*\)",
@@ -924,32 +929,36 @@ def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
 
 
 def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str, str]]:
-    """Win7 上部分环境需用 Index= 而非 InterfaceIndex=，两种都试。"""
-    for where in ("InterfaceIndex=%d" % if_idx, "Index=%d" % if_idx):
-        try:
-            p = _run_text_cmd(
-                [
-                    "wmic",
-                    "path",
-                    "Win32_NetworkAdapterConfiguration",
-                    "where",
-                    where,
-                    "get",
-                    "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
-                    "/format:list",
-                ],
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            continue
-        if p.returncode != 0:
-            continue
-        rows = _parse_wmic_list(p.stdout or "")
-        for row in rows:
-            if row.get("ipenabled", "").strip().lower() in ("true", "1"):
-                return row
-        if rows:
-            return rows[0]
+    """
+    按 Win32_NetworkAdapterConfiguration.InterfaceIndex 查询。
+    Win32_IP4RouteTable.InterfaceIndex、netsh/route print「接口」索引与此字段一致。
+    勿再以 Index=N 回退：Win7 上常见 Index≠InterfaceIndex（如 Index=7、InterfaceIndex=11）；
+    用路由表得到的 11 去查 Index=11 会得到另一块网卡，DHCPEnabled 误判为假。
+    """
+    try:
+        p = _run_text_cmd(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapterConfiguration",
+                "where",
+                "InterfaceIndex=%d" % if_idx,
+                "get",
+                "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
+                "/format:list",
+            ],
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if p.returncode != 0:
+        return None
+    rows = _parse_wmic_list(p.stdout or "")
+    for row in rows:
+        if row.get("ipenabled", "").strip().lower() in ("true", "1"):
+            return row
+    if rows:
+        return rows[0]
     return None
 
 
@@ -1018,6 +1027,59 @@ def _wmic_default_route_interface_index() -> Optional[int]:
     return candidates[0][1]
 
 
+def _dhcp_enabled_from_wmic_raw(raw: str) -> Optional[bool]:
+    """
+    Win32_NetworkAdapterConfiguration.DHCPEnabled。
+    WMIC list 常为 TRUE/FALSE；缺省或非布尔时不应当成「静态」（否则 Win7 DHCP 易被误判）。
+    """
+    s = _clean_wmic_value((raw or "").strip()).strip().lower()
+    if not s or s in ("(null)", "null", "none"):
+        return None
+    if s in ("true", "1", "yes", "y", "-1"):
+        return True
+    if s in ("false", "0", "no", "n"):
+        return False
+    return None
+
+
+def _netsh_value_after_label_colon(line: str) -> str:
+    """中英文 netsh 可能用半角 ':' 或全角 '：' 分隔标签与取值。"""
+    for sep in (":", "\uff1a"):
+        if sep in line:
+            return line.split(sep, 1)[-1].strip()
+    return ""
+
+
+def _netsh_parse_dhcp_enabled_from_addresses(text: str) -> Optional[bool]:
+    """解析 netsh interface ipv4 show addresses 输出里的 DHCP 启用行（中英界面）。"""
+    for raw in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if "dhcp" not in low:
+            continue
+        if ("enabled" not in low) and ("启用" not in line):
+            continue
+        tail = _netsh_value_after_label_colon(line)
+        tl = tail.lower()
+        if re.match(r"(?i)^(yes|true|y|1)\b", tl):
+            return True
+        if re.match(r"(?i)^(no|false|n|0)\b", tl):
+            return False
+        if tail in ("否", "否。", "NO", "no"):
+            return False
+        # 中文版常见：冒号后为「是」（半角冒号或非 ASCII 分隔已在上面的 tail 中取到）
+        if tail in ("是", "是。") or tail.startswith("是"):
+            return True
+        # 容错：极少数主题下取值与标签粘在同一侧
+        if "否" in tail and len(tail) <= 8:
+            return False
+        if "是" in tail and ("否" not in tail):
+            return True
+    return None
+
+
 def _detail_row_to_dict(
     row: Dict[str, str], preferred_ip: str
 ) -> Dict[str, Any]:
@@ -1039,16 +1101,17 @@ def _detail_row_to_dict(
         t = t.strip()
         if _is_dotted_ipv4(t):
             dns_v4.append(t)
-    dhcp_raw = row.get("dhcpenabled", "").strip().lower()
-    dhcp = dhcp_raw in ("true", "1")
-    return {
+    dhcp_hint = _dhcp_enabled_from_wmic_raw(row.get("dhcpenabled", ""))
+    out_d: Dict[str, Any] = {
         "ip": chosen_ip,
         "mask": chosen_mask,
         "gateway": gw,
         "dns_primary": dns_v4[0] if dns_v4 else "",
         "dns_secondary": dns_v4[1] if len(dns_v4) > 1 else "",
-        "dhcp": dhcp,
     }
+    if dhcp_hint is not None:
+        out_d["dhcp"] = bool(dhcp_hint)
+    return out_d
 
 
 def _powershell_ipv4_detail_by_default_route() -> Optional[Dict[str, Any]]:
@@ -1082,7 +1145,10 @@ def _powershell_ipv4_detail_by_default_route() -> Optional[Dict[str, Any]]:
         "$d1 = ''; $d2 = ''; "
         "if ($dns.Count -ge 1) { $d1 = [string]$dns[0] }; "
         "if ($dns.Count -ge 2) { $d2 = [string]$dns[1] }; "
-        "$dhcp = ($pick.PrefixOrigin -eq 'Dhcp'); "
+        "$ifi = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+        "$dhcpIfc = ($ifi -ne $null -and $ifi.Dhcp -eq 'Enabled'); "
+        "$dhcp = ($dhcpIfc -or ($pick.PrefixOrigin -eq 'Dhcp')); "
         "$pfx = [int]$pick.PrefixLength; "
         "$o = @{ ok=$true; ip=$pick.IPAddress; prefix=$pfx; gateway=$gw; "
         "dns_primary=$d1; dns_secondary=$d2; dhcp=$dhcp }; "
@@ -1240,6 +1306,7 @@ def get_default_ipv4_detail_snapshot(
         if idx_netsh is not None and (
             not str(out.get("mask") or "").strip()
             or not str(out.get("dns_primary") or "").strip()
+            or not bool(out.get("dhcp"))
         ):
             _merge_ipv4_detail_fields(out, _netsh_ipv4_enrich_from_ifindex(idx_netsh))
 
