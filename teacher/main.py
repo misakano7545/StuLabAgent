@@ -91,7 +91,7 @@ def main() -> None:
     if os.path.exists(yaml_file_path):
         app.log_line(f"配置文件同步已启用 yaml={yaml_file_path}")
     else:
-        app.log_line(f"警告: yaml配置文件不存在 {yaml_file_path}")
+        app.log_line(f"警告: yaml 配置文件不存在 {yaml_file_path}")
 
     def poll_queue() -> None:
         try:
@@ -100,7 +100,7 @@ def main() -> None:
                 if kind == "client_registered":
                     hn = data.get("hostname") or "-"
                     app.log_line(
-                        "上线: pc_name=%s [%s] %s (%s)"
+                        "上线: %s [%s] %s (%s)"
                         % (
                             hn,
                             (data.get("machine_id") or "")[:12] or "-",

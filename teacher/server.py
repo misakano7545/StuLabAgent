@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import errno
 import json
 import os
 import socket
@@ -26,6 +27,26 @@ from common.protocol import (
     read_frame_from_socket,
     write_frame_to_socket,
 )
+
+
+def _socket_exc_likely_peer_hangup(exc: BaseException) -> bool:
+    """True when the client side probably closed or reset TCP (e.g. after IPv4 change)."""
+    if isinstance(exc, ConnectionError):
+        return True
+    if isinstance(exc, OSError):
+        w = getattr(exc, "winerror", None)
+        if w in (10038, 10053, 10054, 10057):
+            return True
+        errno = exc.errno
+        if errno is not None:
+            if errno in (
+                errno.ECONNRESET,
+                errno.EPIPE,
+                errno.ENOTCONN,
+                errno.ECONNABORTED,
+            ):
+                return True
+    return False
 
 
 @dataclass
@@ -302,14 +323,15 @@ class TeacherServer:
                     s_err = self._sessions.get(session_id)
                     if s_err:
                         err_host = str(s_err.hostname or "")
-            self._emit(
-                "client_error",
-                {
-                    "session_id": session_id or "",
-                    "hostname": err_host,
-                    "message": str(e),
-                },
-            )
+            if not _socket_exc_likely_peer_hangup(e):
+                self._emit(
+                    "client_error",
+                    {
+                        "session_id": session_id or "",
+                        "hostname": err_host,
+                        "message": str(e),
+                    },
+                )
         finally:
             if session_id:
                 disc_host = ""

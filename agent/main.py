@@ -51,7 +51,7 @@ from agent.firewall_manager import (
     start_clash_if_config_exists,
 )
 
-AGENT_VERSION = "1.0.3"
+AGENT_VERSION = "1.0.0"
 
 
 def _debug(msg: str) -> None:
@@ -243,11 +243,32 @@ class AgentClient:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _try_presend_ipv4_result(self, cmd_id: str) -> bool:
+        """Notify teacher before netsh; TCP often dies after IP change (WinError 10038)."""
+        if not cmd_id:
+            return False
+        try:
+            self._send(
+                {
+                    "type": MSG_RESULT,
+                    "cmd_id": cmd_id,
+                    "ok": True,
+                    "message": (
+                        "正在通过 netsh 应用 IPv4；成功后本会话通常会断开并重连。"
+                        "若未再收到本条命令的第二条结果，一般以本机网络配置为准。"
+                    ),
+                }
+            )
+            return True
+        except (ConnectionError, OSError, ValueError):
+            return False
+
     def _handle_command(self, cmd: Dict[str, Any]) -> None:
         cmd_type = get_message_type(cmd)
         cmd_id = str(cmd.get("cmd_id") or "")
         ok = False
         msg = "unsupported command"
+        skip_final_result = False
 
         if cmd_type == MSG_COMMAND_RENAME_HOST:
             new_name = str(cmd.get("new_hostname") or "").strip()
@@ -262,7 +283,12 @@ class AgentClient:
             else:
                 mode = str(cmd.get("mode") or "").strip().lower()
                 if mode == "dhcp":
+                    presend = (
+                        sys.platform == "win32" and self._try_presend_ipv4_result(cmd_id)
+                    )
                     ok, msg = apply_ipv4_dhcp(name)
+                    if sys.platform == "win32" and ok and presend:
+                        skip_final_result = True
                 elif mode == "static":
                     ip = str(cmd.get("ip") or "").strip()
                     mask = str(cmd.get("mask") or "").strip()
@@ -272,7 +298,13 @@ class AgentClient:
                     if not ip or not mask:
                         ok, msg = False, "missing ip/mask"
                     else:
+                        presend = (
+                            sys.platform == "win32"
+                            and self._try_presend_ipv4_result(cmd_id)
+                        )
                         ok, msg = apply_ipv4_static(name, ip, mask, gw, dns1, dns2)
+                        if sys.platform == "win32" and ok and presend:
+                            skip_final_result = True
                 else:
                     ok, msg = False, "unknown mode"
         elif cmd_type == MSG_COMMAND_POWER:
@@ -319,6 +351,9 @@ class AgentClient:
             else:
                 ok = False
                 msg = "unknown mode: %s" % mode
+
+        if skip_final_result:
+            return
 
         try:
             self._send(
