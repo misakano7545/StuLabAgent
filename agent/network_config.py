@@ -485,10 +485,13 @@ def _interface_from_route_print(interface_ip: str) -> Tuple[Optional[str], str]:
     return None, "no WMI row for interface IP %s" % interface_ip
 
 
-def _parse_route_print_default_interface_ip(route_text: str) -> Optional[str]:
-    """解析 route print -4 中 0.0.0.0/0.0.0.0 默认路由行，取「接口」列 IPv4（中英界面均多为数字列）。"""
+def _parse_route_print_default_route_row(route_text: str) -> Optional[Tuple[int, str, str]]:
+    """
+    解析 route print -4 中默认 IPv4 路由行（0.0.0.0 0.0.0.0 …）。
+    返回 (metric, gateway_ipv4, interface_ipv4)；无则 None。
+    """
     lines = route_text.replace("\r\n", "\n").split("\n")
-    best: Optional[Tuple[int, str]] = None  # (metric, interface_ip)
+    best: Optional[Tuple[int, str, str]] = None  # (metric, gw, iface_ip)
     for line in lines:
         line_stripped = line.strip()
         if not line_stripped.startswith("0.0.0.0"):
@@ -499,16 +502,91 @@ def _parse_route_print_default_interface_ip(route_text: str) -> Optional[str]:
             continue
         if parts[1] != "0.0.0.0":
             continue
+        gw_ip = parts[2]
         iface_ip = parts[3]
         if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", iface_ip):
+            continue
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", gw_ip):
             continue
         try:
             metric = int(parts[4])
         except ValueError:
             continue
         if best is None or metric < best[0]:
-            best = (metric, iface_ip)
-    return best[1] if best else None
+            best = (metric, gw_ip, iface_ip)
+    return best
+
+
+def _parse_route_print_default_interface_ip(route_text: str) -> Optional[str]:
+    """解析 route print -4 中 0.0.0.0/0.0.0.0 默认路由行，取「接口」列 IPv4（中英界面均多为数字列）。"""
+    row = _parse_route_print_default_route_row(route_text)
+    return row[2] if row else None
+
+
+def _parse_route_print_default_gateway(route_text: str) -> Optional[str]:
+    """默认路由行中的 IPv4 网关。"""
+    row = _parse_route_print_default_route_row(route_text)
+    return row[1] if row else None
+
+
+def _route_print_ipv4_default_gateway() -> str:
+    try:
+        p = subprocess.run(
+            ["route", "print", "-4"],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if p.returncode != 0:
+        return ""
+    g = _parse_route_print_default_gateway(p.stdout or "")
+    return g if g else ""
+
+
+def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str, str]]:
+    """
+    Win7 等环境下路由表 InterfaceIndex 与 NICConfiguration.InterfaceIndex 可能不一致；
+    按本机 IPv4 在 WMI 全部已启用配置中反查对应行。
+    """
+    target = (target_ipv4 or "").strip().lower()
+    if not target or not _is_dotted_ipv4(target):
+        return None
+    try:
+        p = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "Win32_NetworkAdapterConfiguration",
+                "where",
+                "IPEnabled=true",
+                "get",
+                "InterfaceIndex,IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=_subprocess_flags(),
+            timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    for row in _parse_wmic_list(p.stdout or ""):
+        if row.get("ipenabled", "").strip().lower() not in ("true", "1"):
+            continue
+        raw_ip = row.get("ipaddress", "")
+        tokens = [t.strip().lower() for t in _wmic_multivalue_tokens(raw_ip)]
+        if not tokens:
+            t0 = _clean_wmic_value(raw_ip).strip().lower()
+            if t0:
+                tokens = [t0]
+        if target in tokens:
+            return row
+    return None
 
 
 def _interface_from_route_print_only() -> Tuple[Optional[str], str]:
@@ -744,32 +822,36 @@ def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
 
 
 def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str, str]]:
-    try:
-        p = subprocess.run(
-            [
-                "wmic",
-                "path",
-                "Win32_NetworkAdapterConfiguration",
-                "where",
-                "InterfaceIndex=%d" % if_idx,
-                "get",
-                "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
-                "/format:list",
-            ],
-            capture_output=True,
-            text=True,
-            creationflags=_subprocess_flags(),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if p.returncode != 0:
-        return None
-    rows = _parse_wmic_list(p.stdout or "")
-    for row in rows:
-        if row.get("ipenabled", "").strip().lower() in ("true", "1"):
-            return row
-    return rows[0] if rows else None
+    """Win7 上部分环境需用 Index= 而非 InterfaceIndex=，两种都试。"""
+    for where in ("InterfaceIndex=%d" % if_idx, "Index=%d" % if_idx):
+        try:
+            p = subprocess.run(
+                [
+                    "wmic",
+                    "path",
+                    "Win32_NetworkAdapterConfiguration",
+                    "where",
+                    where,
+                    "get",
+                    "IPAddress,IPSubnet,DefaultIPGateway,DNSServerSearchOrder,DHCPEnabled,IPEnabled",
+                    "/format:list",
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=_subprocess_flags(),
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if p.returncode != 0:
+            continue
+        rows = _parse_wmic_list(p.stdout or "")
+        for row in rows:
+            if row.get("ipenabled", "").strip().lower() in ("true", "1"):
+                return row
+        if rows:
+            return rows[0]
+    return None
 
 
 def _ipv4_subnet_pairs_from_wmi_row(row: Dict[str, str]) -> List[Tuple[str, str]]:
@@ -1016,6 +1098,22 @@ def get_default_ipv4_detail_snapshot(ttl_sec: float = 20.0) -> Dict[str, Any]:
 
     if not str(out.get("ip") or "").strip() and pref:
         out["ip"] = pref
+
+    hip = str(out.get("ip") or pref).strip()
+    if hip:
+        need_more = (
+            not str(out.get("mask") or "").strip()
+            or not str(out.get("gateway") or "").strip()
+            or not str(out.get("dns_primary") or "").strip()
+        )
+        if need_more:
+            row_fix = _wmic_nic_configuration_row_for_ipv4(hip)
+            if row_fix:
+                _merge_ipv4_detail_fields(out, _detail_row_to_dict(row_fix, hip))
+    if not str(out.get("gateway") or "").strip():
+        gw_rp = _route_print_ipv4_default_gateway()
+        if gw_rp:
+            out["gateway"] = gw_rp
 
     _detail_mono = now
     _detail_payload = dict(out)

@@ -293,16 +293,17 @@ class TeacherServer:
                         s_res = self._sessions.get(session_id)
                         if s_res:
                             res_host = str(s_res.hostname or "")
-                    self._emit(
-                        "command_result",
-                        {
-                            "session_id": session_id,
-                            "hostname": res_host,
-                            "cmd_id": msg.get("cmd_id"),
-                            "ok": bool(msg.get("ok")),
-                            "message": str(msg.get("message") or ""),
-                        },
-                    )
+                    payload_cr: Dict[str, Any] = {
+                        "session_id": session_id,
+                        "hostname": res_host,
+                        "cmd_id": msg.get("cmd_id"),
+                        "ok": bool(msg.get("ok")),
+                        "message": str(msg.get("message") or ""),
+                    }
+                    det_r = msg.get("ipv4_detail")
+                    if isinstance(det_r, dict):
+                        payload_cr["ipv4_detail"] = det_r
+                    self._emit("command_result", payload_cr)
                 elif mtype == MSG_REQUEST_CONFIG:
                     config_content = ""
                     if self._yaml_file_path and os.path.exists(self._yaml_file_path):

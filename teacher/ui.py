@@ -85,6 +85,7 @@ class TeacherApp(tk.Tk):
         server: "TeacherServer",
         on_enqueue_rename: Callable[[str, str, str], bool],
         on_enqueue_set_ipv4: Callable[[str, str, Dict[str, Any]], bool],
+        on_enqueue_query_ipv4_detail: Callable[[str, str], bool],
         on_enqueue_power: Callable[[str, str, str], bool],
         on_enqueue_network_restrict: Callable[[str, str, Dict[str, Any]], bool],
     ) -> None:
@@ -95,6 +96,7 @@ class TeacherApp(tk.Tk):
         self._server = server
         self._on_enqueue_rename = on_enqueue_rename
         self._on_enqueue_set_ipv4 = on_enqueue_set_ipv4
+        self._on_enqueue_query_ipv4_detail = on_enqueue_query_ipv4_detail
         self._on_enqueue_power = on_enqueue_power
         self._on_enqueue_network_restrict = on_enqueue_network_restrict
         self._cmd_counter = 0
@@ -117,6 +119,7 @@ class TeacherApp(tk.Tk):
         self._drag_select_anchor_y: Optional[int] = None
         self._drag_select_active = False
         self._drag_visual: Optional[tk.Toplevel] = None
+        self._ipv4_live_waiters: Dict[str, Dict[str, Any]] = {}
         self._build_menu()
 
         main = ttk.Frame(self, padding=6)
@@ -559,28 +562,146 @@ class TeacherApp(tk.Tk):
         d.columnconfigure(0, weight=1)
         _dlg_lock_min_size(d)
 
-    def _fill_ipv4_static_fields_from_session(self, entries: List[ttk.Entry], sid: str) -> None:
-        """用学生机上报的默认出口网卡参数预填静态 IPv4 表单（来自 Agent 心跳/注册中的 ipv4_detail）。"""
-        s: Optional["ClientSession"] = None
+    def _snapshot_session_ipv4_into_dict(self, volatile: Dict[str, Any], sid: str) -> None:
+        """把会话缓存中的 ipv4_detail / reported_ipv4 写入 volatile（整块覆盖）。"""
+        volatile.clear()
         for x in self._sessions_cache:
-            if x.session_id == sid:
-                s = x
-                break
-        if not s:
+            if x.session_id != sid:
+                continue
+            d = getattr(x, "ipv4_detail", None) or {}
+            if isinstance(d, dict):
+                volatile.update(d)
+            if not str(volatile.get("ip") or "").strip():
+                volatile["ip"] = str(x.reported_ipv4 or "").strip()
             return
-        d = getattr(s, "ipv4_detail", None) or {}
-        if not isinstance(d, dict):
-            d = {}
-        ip = str(d.get("ip") or "").strip() or (s.reported_ipv4 or "").strip()
-        mask = str(d.get("mask") or "").strip()
-        gw = str(d.get("gateway") or "").strip()
-        dns1 = str(d.get("dns_primary") or "").strip()
-        dns2 = str(d.get("dns_secondary") or "").strip()
+
+    def _merge_session_ipv4_detail_into_volatile(self, volatile: Dict[str, Any], sid: str) -> None:
+        """用会话缓存只补缺值，不覆盖已采集字段。"""
+        for x in self._sessions_cache:
+            if x.session_id != sid:
+                continue
+            d = getattr(x, "ipv4_detail", None) or {}
+            if not isinstance(d, dict):
+                break
+            for k in ("ip", "mask", "gateway", "dns_primary", "dns_secondary"):
+                cur = str(volatile.get(k) or "").strip()
+                inc = str(d.get(k) or "").strip()
+                if not cur and inc:
+                    volatile[str(k)] = inc
+            if not str(volatile.get("ip") or "").strip():
+                volatile["ip"] = str(x.reported_ipv4 or "").strip()
+            return
+
+    def _fill_ipv4_entries_from_snapshot(
+        self, entries: List[ttk.Entry], sid: str, snap: Dict[str, Any]
+    ) -> None:
+        """按快照 dict 填入五个静态输入框；ip 空缺时用会话上报 IPv4。"""
+        ip = str(snap.get("ip") or "").strip()
+        if not ip:
+            for x in self._sessions_cache:
+                if x.session_id == sid:
+                    ip = str(x.reported_ipv4 or "").strip()
+                    break
+        mask = str(snap.get("mask") or "").strip()
+        gw = str(snap.get("gateway") or "").strip()
+        dns1 = str(snap.get("dns_primary") or "").strip()
+        dns2 = str(snap.get("dns_secondary") or "").strip()
         vals = [ip, mask, gw, dns1, dns2]
         for e, v in zip(entries, vals):
             e.delete(0, tk.END)
             if v:
                 e.insert(0, v)
+
+    def _fill_ipv4_static_fields_from_session(self, entries: List[ttk.Entry], sid: str) -> None:
+        """用书签缓存预填静态 IPv4（无实时查询或非 static 回填用）。"""
+        buf: Dict[str, Any] = {}
+        self._snapshot_session_ipv4_into_dict(buf, sid)
+        self._fill_ipv4_entries_from_snapshot(entries, sid, buf)
+
+    def handle_ipv4_detail_query_result(self, data: Dict[str, Any]) -> None:
+        cmd_id = str(data.get("cmd_id") or "")
+        w = self._ipv4_live_waiters.get(cmd_id)
+        if not w:
+            return
+        if str(data.get("session_id") or "") != str(w["sid"]):
+            return
+        self._ipv4_live_waiters.pop(cmd_id, None)
+        dlg: tk.Toplevel = w["dlg"]
+        ah = w.get("after_cancel_holder") or []
+        if ah and ah[0] is not None:
+            try:
+                dlg.after_cancel(ah[0])
+            except tk.TclError:
+                pass
+            ah[0] = None
+        if not dlg.winfo_exists():
+            return
+        entries = w["entries"]
+        hint = w["hint"]
+        mode = w["mode"]
+        volatile: Dict[str, Any] = w["volatile"]
+        sid = w["sid"]
+        radios: List[ttk.Widget] = w.get("radios") or []
+        btn_ok = w.get("btn_ok")
+
+        BASE_HINT = "将作用于「默认网关所在网卡」。改 IP 可能导致 Agent 短暂断线后自动重连。"
+        ok_rb = bool(data.get("ok"))
+        det = data.get("ipv4_detail")
+
+        volatile.clear()
+        if ok_rb and isinstance(det, dict):
+            volatile.update(det)
+        self._merge_session_ipv4_detail_into_volatile(volatile, sid)
+        if not ok_rb:
+            hint.configure(
+                text=BASE_HINT + "（学生端未返回有效快照或未识别命令，已用最近一次心跳/cache 补缺。）",
+                wraplength=420,
+            )
+        elif not isinstance(det, dict) or not any(str(det.get(k) or "").strip() for k in ("ip", "mask")):
+            hint.configure(
+                text=BASE_HINT + "（快照内容不完整，已从会话缓存补缺。）",
+                wraplength=420,
+            )
+        else:
+            hint.configure(text=BASE_HINT, wraplength=420)
+
+        if btn_ok:
+            btn_ok.configure(state=tk.NORMAL)
+        for e in entries:
+            e.configure(state=tk.NORMAL)
+        for r in radios:
+            r.configure(state=tk.NORMAL)
+        if mode.get() == "static":
+            self._fill_ipv4_entries_from_snapshot(entries, sid, volatile)
+
+    def _ipv4_live_query_timeout(self, cmd_id: str) -> None:
+        w = self._ipv4_live_waiters.pop(cmd_id, None)
+        if not w:
+            return
+        dlg = w["dlg"]
+        if not dlg.winfo_exists():
+            return
+        volatile: Dict[str, Any] = w["volatile"]
+        sid = w["sid"]
+        self._snapshot_session_ipv4_into_dict(volatile, sid)
+        hint = w["hint"]
+        hint.configure(
+            text=(
+                "将作用于「默认网关所在网卡」。改 IP 可能导致 Agent 短暂断线后自动重连。"
+                "（等待学生端响应超时，已使用最近一次心跳数据。）"
+            ),
+            wraplength=420,
+        )
+        btn_ok = w.get("btn_ok")
+        if btn_ok:
+            btn_ok.configure(state=tk.NORMAL)
+        for e in w["entries"]:
+            e.configure(state=tk.NORMAL)
+        for r in w.get("radios") or []:
+            r.configure(state=tk.NORMAL)
+        mode = w["mode"]
+        if mode.get() == "static":
+            self._fill_ipv4_entries_from_snapshot(w["entries"], sid, volatile)
 
     def _dlg_ipv4(self) -> None:
         sids = self.selected_session_ids()
@@ -595,13 +716,13 @@ class TeacherApp(tk.Tk):
         d.title("修改网卡 IPv4")
         d.transient(self)
         d.grab_set()
+        volatile: Dict[str, Any] = {}
         mode = tk.StringVar(value="static")
-        ttk.Radiobutton(d, text="静态 IPv4", variable=mode, value="static").grid(
-            row=0, column=0, sticky=tk.W, padx=8, pady=(8, 2)
-        )
-        ttk.Radiobutton(d, text="DHCP 自动获取", variable=mode, value="dhcp").grid(
-            row=1, column=0, sticky=tk.W, padx=8, pady=2
-        )
+
+        rb_static = ttk.Radiobutton(d, text="静态 IPv4", variable=mode, value="static")
+        rb_static.grid(row=0, column=0, sticky=tk.W, padx=8, pady=(8, 2))
+        rb_dhcp = ttk.Radiobutton(d, text="DHCP 自动获取", variable=mode, value="dhcp")
+        rb_dhcp.grid(row=1, column=0, sticky=tk.W, padx=8, pady=2)
 
         f = ttk.LabelFrame(d, text="静态参数", padding=6)
         f.grid(row=2, column=0, sticky="ew", padx=8, pady=6)
@@ -614,22 +735,41 @@ class TeacherApp(tk.Tk):
             entries.append(e)
         f.columnconfigure(1, weight=1)
 
+        for e in entries:
+            e.configure(state=tk.DISABLED)
+
+        hint = ttk.Label(
+            d,
+            text="正在向学生机查询当前默认网卡 IPv4 参数……",
+            wraplength=420,
+        )
+        hint.grid(row=3, column=0, padx=8, pady=4, sticky=tk.W)
+
         def sync_static_fields_from_mode(*_a: object) -> None:
             if mode.get() == "static":
-                self._fill_ipv4_static_fields_from_session(entries, sid)
+                self._fill_ipv4_entries_from_snapshot(entries, sid, volatile)
             else:
                 for e in entries:
                     e.delete(0, tk.END)
 
-        mode.trace_add("write", sync_static_fields_from_mode)
+        tr_ipv4_mode = mode.trace_add("write", sync_static_fields_from_mode)
         sync_static_fields_from_mode()
 
-        hint = ttk.Label(
-            d,
-            text="将作用于「默认网关所在网卡」。改 IP 可能导致 Agent 短暂断线后自动重连。",
-            wraplength=420,
-        )
-        hint.grid(row=3, column=0, padx=8, pady=4, sticky=tk.W)
+        q_cmd_id = self.next_cmd_id()
+        after_holder: List[Optional[str]] = [None]
+
+        def teardown_ipv4_dlg(*_a: object) -> None:
+            self._ipv4_live_waiters.pop(q_cmd_id, None)
+            if after_holder[0] is not None:
+                try:
+                    d.after_cancel(after_holder[0])
+                except (tk.TclError, ValueError):
+                    pass
+                after_holder[0] = None
+            try:
+                mode.trace_remove("write", tr_ipv4_mode)
+            except tk.TclError:
+                pass
 
         def ok() -> None:
             m = mode.get()
@@ -662,16 +802,57 @@ class TeacherApp(tk.Tk):
                         json.dumps(payload, ensure_ascii=False),
                     )
                 )
+                teardown_ipv4_dlg()
                 d.destroy()
             else:
                 messagebox.showerror("错误", "会话不存在或已断开。", parent=d)
 
+        def cancel_ipv4_dlg() -> None:
+            teardown_ipv4_dlg()
+            d.destroy()
+
         bf = ttk.Frame(d)
         bf.grid(row=4, column=0, pady=8)
-        ttk.Button(bf, text="确定", command=ok).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bf, text="取消", command=d.destroy).pack(side=tk.LEFT, padx=4)
+        btn_ok = ttk.Button(bf, text="确定", command=ok, state=tk.DISABLED)
+        btn_ok.pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text="取消", command=cancel_ipv4_dlg).pack(side=tk.LEFT, padx=4)
+        rb_static.configure(state=tk.DISABLED)
+        rb_dhcp.configure(state=tk.DISABLED)
+        self._ipv4_live_waiters[q_cmd_id] = {
+            "sid": sid,
+            "dlg": d,
+            "entries": entries,
+            "hint": hint,
+            "mode": mode,
+            "volatile": volatile,
+            "after_cancel_holder": after_holder,
+            "radios": [rb_static, rb_dhcp],
+            "btn_ok": btn_ok,
+        }
+        after_holder[0] = d.after(15000, lambda: self._ipv4_live_query_timeout(q_cmd_id))
+        if not self._on_enqueue_query_ipv4_detail(sid, q_cmd_id):
+            self._ipv4_live_waiters.pop(q_cmd_id, None)
+            if after_holder[0] is not None:
+                try:
+                    d.after_cancel(after_holder[0])
+                except (tk.TclError, ValueError):
+                    pass
+            try:
+                mode.trace_remove("write", tr_ipv4_mode)
+            except tk.TclError:
+                pass
+            messagebox.showerror("错误", "会话不存在或已断开，无法查询网卡。", parent=d)
+            d.destroy()
+            return
+
+        self.log_line(
+            "已排队: 查询 IPv4 快照 pc_name=%s cmd_id=%s session=%s"
+            % (self._pc_name_for_session(sid), q_cmd_id, sid)
+        )
+
         d.columnconfigure(0, weight=1)
         _dlg_lock_min_size(d)
+        d.protocol("WM_DELETE_WINDOW", cancel_ipv4_dlg)
 
     def _dlg_power(self) -> None:
         sids = self.selected_session_ids()

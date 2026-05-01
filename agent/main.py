@@ -21,6 +21,7 @@ from common.protocol import (
     MSG_ACK,
     MSG_COMMAND_NETWORK_RESTRICT,
     MSG_COMMAND_POWER,
+    MSG_COMMAND_QUERY_IPV4_DETAIL,
     MSG_COMMAND_RENAME_HOST,
     MSG_COMMAND_SET_IPV4,
     MSG_CONFIG_RESPONSE,
@@ -278,6 +279,24 @@ class AgentClient:
             if ok:
                 msg = "%s; auto reboot in 1s" % msg
                 self._schedule_reboot()
+        elif cmd_type == MSG_COMMAND_QUERY_IPV4_DETAIL:
+            snap = get_default_ipv4_detail_snapshot(ttl_sec=0.0)
+            ok = True
+            msg = "ipv4_detail"
+            detail_payload = snap
+            try:
+                self._send(
+                    {
+                        "type": MSG_RESULT,
+                        "cmd_id": cmd_id,
+                        "ok": bool(ok),
+                        "message": str(msg),
+                        "ipv4_detail": detail_payload if isinstance(detail_payload, dict) else {},
+                    }
+                )
+            except (ConnectionError, OSError, ValueError):
+                self._stop.set()
+            return
         elif cmd_type == MSG_COMMAND_SET_IPV4:
             name, diag = get_default_ipv4_interface_name()
             if not name:

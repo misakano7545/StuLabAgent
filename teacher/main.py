@@ -17,6 +17,7 @@ from common.paths import default_teacher_config_path, resolve_config_path
 from common.protocol import (
     MSG_COMMAND_NETWORK_RESTRICT,
     MSG_COMMAND_POWER,
+    MSG_COMMAND_QUERY_IPV4_DETAIL,
     MSG_COMMAND_RENAME_HOST,
     MSG_COMMAND_SET_IPV4,
 )
@@ -68,6 +69,15 @@ def main() -> None:
         body.update(payload)
         return server.enqueue_command(session_id, body)
 
+    def enqueue_query_ipv4_detail(session_id: str, cmd_id: str) -> bool:
+        return server.enqueue_command(
+            session_id,
+            {
+                "type": MSG_COMMAND_QUERY_IPV4_DETAIL,
+                "cmd_id": cmd_id,
+            },
+        )
+
     def enqueue_power(session_id: str, cmd_id: str, action: str) -> bool:
         return server.enqueue_command(
             session_id,
@@ -83,7 +93,14 @@ def main() -> None:
         body.update(payload)
         return server.enqueue_command(session_id, body)
 
-    app = TeacherApp(server, enqueue_rename, enqueue_set_ipv4, enqueue_power, enqueue_network_restrict)
+    app = TeacherApp(
+        server,
+        enqueue_rename,
+        enqueue_set_ipv4,
+        enqueue_query_ipv4_detail,
+        enqueue_power,
+        enqueue_network_restrict,
+    )
     app.log_line(
         "教师端已启动 监听 %s:%s token=%s"
         % (listen_host, listen_port, "已启用" if token else "未启用")
@@ -114,6 +131,7 @@ def main() -> None:
                         % (data.get("hostname") or "-", data.get("session_id"))
                     )
                 elif kind == "command_result":
+                    app.handle_ipv4_detail_query_result(data)
                     app.log_line(
                         "结果 pc_name=%s cmd_id=%s ok=%s %s"
                         % (
