@@ -1,9 +1,11 @@
 # 学生机房管理（教师端 + 学生端 Agent）
 
-基于 Python 的 Windows 机房管理工具，采用 **教师端 + 学生端 Agent** 架构：
+由于学校机房同传后修改 IP 及计算机名称存在不便，加上极域电子教室的黑白名单上网控制功能约等于废物，故基于 Python 开发此 Windows 机房管理辅助工具，采用 **教师端 + 学生端 Agent** 架构：
 
 - 教师端：`tkinter` 图形界面 + TCP 服务端，展示在线学生机并批量下发命令。
 - 学生端 Agent：主动连接教师端，周期心跳，执行命令（改名 / 改 IPv4 / 电源 / 网络限制）。
+
+此辅助工具设计为极域电子教室的补充，理论上兼容其他电子教室软件（未测试，如有不兼容可在 issues 或下方的 QQ 交流群反馈）。教师端和学生端通信通过 TCP 套接字，消息采用 JSON 格式，支持 `token` 校验以防止未授权 Agent 接入。网络限制功能基于 [mihomo](https://github.com/MetaCubeX/mihomo) 项目，针对目前玉林市某些中小学机房学生经常使用浏览器刷抖音特点，设计了域名黑白名单功能，教师端下发后会同步生成 YAML 配置并尝试启动 `mihomo` 进行网络流量控制，以更好地维护课堂秩序。
 
 ---
 
@@ -23,14 +25,15 @@
 ## 环境要求
 
 - 系统：Windows 7 及以上（依赖 `wmic`、`netsh`、PowerShell）。
-- Python：
-  - Windows 7 建议 Python `3.8.x`
-  - Windows 10/11 建议 Python `3.10+`
+- 电子教室软件：极域电子教室 / 其他电子教室软件（未测试，如有不兼容可在 issues 或下方的 QQ 交流群反馈）
 - 权限：
   - 教师端通常无需管理员权限（但需放行监听端口入站）。
   - 学生端执行改名 / 改 IP / 网络限制时必须管理员权限。
-- 可选组件（仅学生端网络限制需要）：
-  - `mihomo.exe`（必须与 [mihomo](https://github.com/MetaCubeX/mihomo) 发行版一致）
+- 必选组件（学生端网络限制需要）：
+  - `mihomo.exe`（必须与 [mihomo](https://github.com/MetaCubeX/mihomo) 发行版一致，否则无法使用该功能）
+- Python：
+  - Windows 7 建议 Python `3.8.x`
+  - Windows 10/11 建议 Python `3.10+`
 
 ---
 
