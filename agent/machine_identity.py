@@ -2,34 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
 import sys
-from typing import Dict, List, Tuple
-
+import json
+import subprocess
+from typing import List, Tuple
+from common.utils import get_subprocess_flags, parse_wmic_list
 from agent.network_config import get_default_ipv4_interface_name
-
-
-def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-
-def _parse_wmic_list(text: str) -> List[Dict[str, str]]:
-    text = text.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n").strip()
-    blocks = re.split(r"\n\s*\n", text)
-    rows: List[Dict[str, str]] = []
-    for block in blocks:
-        item: Dict[str, str] = {}
-        for line in block.splitlines():
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            item[k.strip().lower()] = v.strip()
-        if item:
-            rows.append(item)
-    return rows
 
 
 def _normalize_mac(mac: str) -> str:
@@ -92,12 +71,12 @@ def _physical_adapter_mac_rows_wmi() -> List[Tuple[str, str]]:
             capture_output=True,
             text=True,
             timeout=30,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
         if p.returncode != 0:
             return []
         out: List[Tuple[str, str]] = []
-        for row in _parse_wmic_list(p.stdout or ""):
+        for row in parse_wmic_list(p.stdout or ""):
             ne = row.get("netenabled", "").strip().lower()
             if ne in ("false", "0"):
                 continue
@@ -139,7 +118,7 @@ def _physical_adapter_mac_rows_powershell() -> List[Tuple[str, str]]:
             capture_output=True,
             text=True,
             timeout=45,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import queue
 import sys
+import json
+import queue
+import argparse
 from typing import Any, Dict
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

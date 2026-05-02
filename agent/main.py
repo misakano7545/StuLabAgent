@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import platform
+import sys
+import json
+import time
 import random
 import socket
-import subprocess
-import sys
+import argparse
+import platform
 import threading
-import time
-from typing import Any, Dict, Optional
-
+import subprocess
 from PIL import Image, ImageDraw
-
+from common.utils import is_admin
+from typing import Any, Dict, Optional
+from agent.rename_host import rename_computer
 from common.paths import default_agent_config_path, resolve_config_path
+from agent.machine_identity import get_machine_id, get_preferred_mac_display
 from common.protocol import (
     MSG_ACK,
     MSG_COMMAND_NETWORK_RESTRICT,
@@ -35,16 +36,12 @@ from common.protocol import (
     read_frame_from_socket,
     write_frame_to_socket,
 )
-
-from agent.machine_identity import get_machine_id, get_preferred_mac_display
 from agent.network_config import (
     apply_ipv4_dhcp,
     apply_ipv4_static,
     get_default_ipv4_detail_snapshot,
     get_default_ipv4_interface_name,
-    is_admin,
 )
-from agent.rename_host import rename_computer
 from agent.firewall_manager import (
     apply_blacklist,
     apply_whitelist,
@@ -209,8 +206,6 @@ class AgentClient:
                 "ipv4_detail": get_default_ipv4_detail_snapshot(),
                 "os_version": _get_os_version(),
                 "agent_version": AGENT_VERSION,
-                # Keep legacy key for backward compatibility with old teacher builds.
-                "version": AGENT_VERSION,
                 "token": self.token,
             },
         )

@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import re
-import socket
-import subprocess
 import sys
-import threading
+import json
 import time
+import socket
+import threading
+import subprocess
 from typing import Any, Dict, List, Optional, Set, Tuple
-
-from common.wincli_escape import netsh_interface_name_arg
-
-
-def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+from common.utils import get_subprocess_flags, parse_wmic_list, netsh_interface_name_arg, is_admin
 
 
 def _win_console_encoding() -> str:
@@ -42,7 +37,7 @@ def _run_text_cmd(args: List[str], timeout: float = 30.0) -> subprocess.Complete
             text=True,
             encoding=_win_console_encoding(),
             errors="replace",
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=timeout,
         )
     return subprocess.run(
@@ -52,17 +47,6 @@ def _run_text_cmd(args: List[str], timeout: float = 30.0) -> subprocess.Complete
         creationflags=0,
         timeout=timeout,
     )
-
-
-def is_admin() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
 
 
 def mask_from_prefix(prefix: str) -> Optional[str]:
@@ -83,34 +67,6 @@ def normalize_mask(mask: str) -> str:
         dotted = mask_from_prefix(pref)
         return dotted if dotted else m
     return m
-
-
-def _parse_wmic_list(text: str) -> List[Dict[str, str]]:
-    """Parse WMIC /format:list output into dicts with lowercased keys."""
-    text = text.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n").strip()
-    # WMIC often uses blank line between records; also tolerate single-line runs
-    blocks = re.split(r"\n\s*\n", text)
-    rows: List[Dict[str, str]] = []
-    for block in blocks:
-        item: Dict[str, str] = {}
-        for line in block.splitlines():
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            key = k.strip().lower()
-            val = v.strip()
-            # 同一记录里可能出现多行 IPAddress=（数组）；后者会覆盖前者导致 Win7 上漏配
-            if key in item:
-                if val:
-                    prev_parts = [x.strip() for x in item[key].split(",") if x.strip()]
-                    if val not in prev_parts:
-                        item[key] = item[key] + "," + val
-            else:
-                item[key] = val
-        if item:
-            rows.append(item)
-    return rows
 
 
 def _clean_wmic_value(s: str) -> str:
@@ -171,7 +127,7 @@ def _wmic_netconnectionid_for_adapter_index(adapter_index: int) -> Tuple[Optiona
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
     except OSError as e:
         return None, "wmic adapter Index=%s: %s" % (adapter_index, e)
@@ -179,7 +135,7 @@ def _wmic_netconnectionid_for_adapter_index(adapter_index: int) -> Tuple[Optiona
         return None, (p.stderr or p.stdout or "wmic adapter failed").strip()[:300]
     enabled_name: Optional[str] = None
     any_name: Optional[str] = None
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         nid = row.get("netconnectionid", "").strip()
         if not nid:
             continue
@@ -217,13 +173,13 @@ def _wmic_nic_name_for_index(idx: int) -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
     except OSError as e:
         return None, "wmic unavailable: %s" % e
     if p2.returncode != 0:
         return None, (p2.stderr or p2.stdout or "wmic nic failed").strip()[:500]
-    for row in _parse_wmic_list(p2.stdout or ""):
+    for row in parse_wmic_list(p2.stdout or ""):
         m = re.search(r"\d+", row.get("interfaceindex", ""))
         if not m or int(m.group()) != idx:
             continue
@@ -245,7 +201,7 @@ def _wmic_nic_name_for_index(idx: int) -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=30,
         )
     except OSError as e:
@@ -255,7 +211,7 @@ def _wmic_nic_name_for_index(idx: int) -> Tuple[Optional[str], str]:
             idx,
             (pc.stderr or pc.stdout or "").strip()[:300],
         )
-    cfg_rows = list(_parse_wmic_list(pc.stdout or ""))
+    cfg_rows = list(parse_wmic_list(pc.stdout or ""))
     adapter_indices: List[int] = []
     for row in cfg_rows:
         ie = row.get("ipenabled", "").strip().lower()
@@ -301,14 +257,14 @@ def _interface_from_wmi_default_gateway() -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
     except OSError as e:
         return None, "wmic unavailable: %s" % e
     if p.returncode != 0:
         return None, (p.stderr or p.stdout or "wmic failed").strip()[:500]
     candidates: List[Tuple[int, int]] = []  # (metric, interface_index)
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         gw = _clean_wmic_value(row.get("defaultipgateway", ""))
         if not gw or gw.upper() == "NULL":
             continue
@@ -363,7 +319,7 @@ def _powershell_has_get_net_route_cmdlet() -> bool:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=20,
         )
         return p.returncode == 0
@@ -390,7 +346,7 @@ def _interface_from_wmi_ip4_route_table() -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=30,
         )
     except OSError as e:
@@ -398,7 +354,7 @@ def _interface_from_wmi_ip4_route_table() -> Tuple[Optional[str], str]:
     if p.returncode != 0:
         return None, (p.stderr or p.stdout or "wmic Win32_IP4RouteTable failed").strip()[:500]
     candidates: List[Tuple[int, int]] = []  # (metric, interface_index)
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         m = re.search(r"\d+", row.get("interfaceindex", ""))
         if not m:
             continue
@@ -441,7 +397,7 @@ def _interface_from_powershell_net_route() -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=45,
         )
     except subprocess.TimeoutExpired:
@@ -472,7 +428,7 @@ def _interface_from_powershell_net_ip_configuration() -> Tuple[Optional[str], st
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=45,
         )
     except subprocess.TimeoutExpired:
@@ -499,14 +455,14 @@ def _interface_from_route_print(interface_ip: str) -> Tuple[Optional[str], str]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
     except OSError as e:
         return None, "wmic unavailable: %s" % e
     if p.returncode != 0:
         return None, (p.stderr or p.stdout or "wmic ip failed").strip()[:300]
     target = interface_ip.strip().lower()
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         raw_ip = row.get("ipaddress", "")
         tokens = [t.lower() for t in _wmic_multivalue_tokens(raw_ip)]
         if not tokens:
@@ -688,7 +644,7 @@ def _wmic_nic_configuration_row_for_ipv4(target_ipv4: str) -> Optional[Dict[str,
         return None
     if p.returncode != 0:
         return None
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         if row.get("ipenabled", "").strip().lower() not in ("true", "1"):
             continue
         raw_ip = row.get("ipaddress", "")
@@ -763,7 +719,7 @@ def get_default_ipv4_interface_name() -> Tuple[Optional[str], str]:
 
 
 def apply_ipv4_dhcp(interface_name: str) -> Tuple[bool, str]:
-    flags = _subprocess_flags()
+    flags = get_subprocess_flags()
     name_arg = netsh_interface_name_arg(interface_name)
     try:
         p1 = subprocess.run(
@@ -797,7 +753,7 @@ def apply_ipv4_static(
     dns_primary: Optional[str],
     dns_secondary: Optional[str],
 ) -> Tuple[bool, str]:
-    flags = _subprocess_flags()
+    flags = get_subprocess_flags()
     name_arg = netsh_interface_name_arg(interface_name)
     gw = gateway.strip() if gateway else ""
     gw_arg = gw if gw else "none"
@@ -918,7 +874,7 @@ def _wmic_interface_index_for_netconnection_id(target: str) -> Optional[int]:
         return None
     if p.returncode != 0:
         return None
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         nid = row.get("netconnectionid", "").strip()
         m = re.search(r"\d+", row.get("interfaceindex", ""))
         if not nid or not m:
@@ -953,7 +909,7 @@ def _wmic_nic_configuration_by_interface_index(if_idx: int) -> Optional[Dict[str
         return None
     if p.returncode != 0:
         return None
-    rows = _parse_wmic_list(p.stdout or "")
+    rows = parse_wmic_list(p.stdout or "")
     for row in rows:
         if row.get("ipenabled", "").strip().lower() in ("true", "1"):
             return row
@@ -1010,7 +966,7 @@ def _wmic_default_route_interface_index() -> Optional[int]:
     if p.returncode != 0:
         return None
     candidates: List[Tuple[int, int]] = []
-    for row in _parse_wmic_list(p.stdout or ""):
+    for row in parse_wmic_list(p.stdout or ""):
         m = re.search(r"\d+", row.get("interfaceindex", ""))
         if not m:
             continue
@@ -1165,7 +1121,7 @@ def _powershell_ipv4_detail_by_default_route() -> Optional[Dict[str, Any]]:
             ],
             capture_output=True,
             text=True,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
             timeout=45,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):

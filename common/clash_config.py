@@ -25,33 +25,15 @@ def _normalize_policy(mode: str, policy: str) -> str:
     return "REJECT" if mode == "blacklist" else "DIRECT"
 
 
-def _normalize_legacy_rule(mode: str, rule: Dict[str, str]) -> str:
-    rule_type = str(rule.get("type", "")).strip().lower()
-    value = str(rule.get("value", "")).strip()
-    if not rule_type or not value:
-        return ""
-
-    policy = _normalize_policy(mode, "")
-    if rule_type == "domain":
-        return f"DOMAIN-SUFFIX,{value},{policy}"
-    if rule_type == "ip":
-        if _is_ip(value):
-            return f"IP-CIDR,{value}/32,{policy}"
-        return f"DOMAIN,{value},{policy}"
-    if rule_type == "subnet":
-        return f"IP-CIDR,{value},{policy}"
-    return ""
-
-
 def _normalize_mihomo_rule(mode: str, rule: Dict[str, str]) -> str:
     rule_type = str(rule.get("type", "")).strip().upper()
     payload = str(rule.get("payload", "")).strip()
     if not rule_type:
-        return _normalize_legacy_rule(mode, rule)
+        return ""
 
     no_payload_types = {"MATCH"}
     if rule_type not in no_payload_types and not payload:
-        return _normalize_legacy_rule(mode, rule)
+        return ""
 
     policy = _normalize_policy(mode, str(rule.get("policy", "")))
     extra = str(rule.get("extra", "")).strip()

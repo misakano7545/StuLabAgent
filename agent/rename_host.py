@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
-
-from common.wincli_escape import wmic_call_arg_eq, wmic_where_eq
+import subprocess
+from common.utils import wmic_call_arg_eq, wmic_where_eq, get_subprocess_flags
 
 
 def rename_computer(new_name: str) -> tuple[bool, str]:
@@ -24,7 +23,7 @@ def rename_computer(new_name: str) -> tuple[bool, str]:
     # NT 6.0–6.1: Vista / Win7 — use WMIC. Win8+ (6.2+) use PowerShell.
     use_wmic = (ver.major, ver.minor) < (6, 2)
 
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    flags = get_subprocess_flags()
 
     try:
         if use_wmic:

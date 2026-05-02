@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import collections
-import errno
-import json
 import os
-import socket
-import threading
+import json
 import time
 import uuid
-from dataclasses import dataclass, field
+import socket
+import threading
+import collections
 from queue import Queue
+from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 from common.protocol import (

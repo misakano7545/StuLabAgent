@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
+import time
 import shutil
 import socket
-import subprocess
-import sys
-import tempfile
 import threading
-import time
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple
+from common.utils import is_admin, get_subprocess_flags
 
 _script_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 CLASH_CONFIG_DIR = os.path.join(_script_dir, "configs")
@@ -18,20 +18,6 @@ CLASH_CONFIG_FILE = os.path.join(CLASH_CONFIG_DIR, "config.yaml")
 CLASH_PROCESS_NAME = "mihomo"
 CLASH_PROCESS_LOCK = threading.Lock()
 _clash_process: Optional[subprocess.Popen] = None
-
-
-def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-
-def is_admin() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
 
 
 def _get_clash_binary_path() -> Tuple[bool, str]:
@@ -239,7 +225,7 @@ def _start_clash_process(clash_path: str) -> Tuple[bool, str]:
             [clash_path, "-f", CLASH_CONFIG_FILE, "-d", CLASH_CONFIG_DIR],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=_subprocess_flags(),
+            creationflags=get_subprocess_flags(),
         )
         time.sleep(1.5)
         if _clash_process.poll() is not None:

@@ -15,6 +15,7 @@ __pycache__/
 # Clash Meta
 mihomo.exe
 configs/config.yaml
+agent/configs
 
 # Trae
 .trae/

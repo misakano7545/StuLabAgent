@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
+import json
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox, scrolledtext, ttk
